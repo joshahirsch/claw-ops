@@ -1,10 +1,16 @@
 const STORAGE_KEY = 'openclaw-config';
 
+export type AuthMode = 'none' | 'bearer' | 'custom';
+
 export interface OpenClawConfig {
   baseUrl: string;
   wsUrl: string;
   enabled: boolean;
-  sessionKeys: string[]; // which sessions to monitor
+  sessionKeys: string[];
+  authMode: AuthMode;
+  authToken: string;
+  authHeaderName: string;
+  authHeaderPrefix: string;
 }
 
 const defaultConfig: OpenClawConfig = {
@@ -12,6 +18,10 @@ const defaultConfig: OpenClawConfig = {
   wsUrl: 'ws://localhost:3000',
   enabled: false,
   sessionKeys: ['default'],
+  authMode: 'none',
+  authToken: '',
+  authHeaderName: 'Authorization',
+  authHeaderPrefix: 'Bearer ',
 };
 
 export function getConfig(): OpenClawConfig {
