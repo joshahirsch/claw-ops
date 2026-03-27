@@ -365,7 +365,15 @@ const SettingsPage = () => {
           Run probes to test connectivity through the server-side proxy. Session key: <span className="font-mono text-foreground">{sessionKey}</span>
         </p>
 
-        <div className="flex gap-2 mb-4">
+        <div className="flex flex-wrap gap-2 mb-4">
+          <button
+            onClick={handleHealthProbe}
+            disabled={probing !== null}
+            className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+          >
+            {probing === 'health' ? <Loader2 className="w-3 h-3 animate-spin" /> : <HeartPulse className="w-3 h-3" />}
+            Test Proxy Only
+          </button>
           <button
             onClick={handleBasicProbe}
             disabled={probing !== null || !config.enabled}
@@ -385,10 +393,11 @@ const SettingsPage = () => {
         </div>
 
         {!config.enabled && (
-          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run probes.</p>
+          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. The proxy health check works regardless.</p>
         )}
 
         <div className="space-y-3">
+          {healthResult && <ProbeDiagnostics result={healthResult} probeType="Proxy health" />}
           {basicResult && <ProbeDiagnostics result={basicResult} probeType="Basic (history)" />}
           {sseResult && <ProbeDiagnostics result={sseResult} probeType="SSE (follow=1)" />}
         </div>
