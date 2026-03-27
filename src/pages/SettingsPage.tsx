@@ -188,6 +188,24 @@ const SettingsPage = () => {
     setProbing(null);
   };
 
+  const handleHealthProbe = async () => {
+    setProbing('health');
+    setHealthResult(null);
+    try {
+      const result = await runHealthProbe();
+      setHealthResult(result);
+      if (result.ok) {
+        toast.success(`Proxy reachable (${result.latencyMs}ms)`);
+      } else {
+        toast.error(result.clientError || `Proxy returned ${result.status}`);
+      }
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'Unknown error';
+      setHealthResult({ ok: false, clientError: error, clientErrorType: 'exception', failurePoint: 'proxy_health' });
+    }
+    setProbing(null);
+  };
+
   const handleSave = () => {
     saveConfig(config);
     toast.success('Configuration saved');
