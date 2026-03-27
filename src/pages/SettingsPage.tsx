@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap } from 'lucide-react';
+import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse } from 'lucide-react';
 import { getConfig, saveConfig, type OpenClawConfig, type AuthMode } from '@/lib/openclaw/config';
-import { runBasicProbe, runSSEProbe, type ProbeResult } from '@/lib/openclaw/client';
+import { runBasicProbe, runSSEProbe, runHealthProbe, type ProbeResult } from '@/lib/openclaw/client';
 import { toast } from 'sonner';
 
 interface HealthItem {
@@ -128,10 +128,11 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
 
 const SettingsPage = () => {
   const [config, setConfig] = useState<OpenClawConfig>(getConfig);
-  const [probing, setProbing] = useState<'basic' | 'sse' | null>(null);
+  const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'untested' | 'connected' | 'failed'>('untested');
   const [basicResult, setBasicResult] = useState<ProbeResult | null>(null);
   const [sseResult, setSSEResult] = useState<ProbeResult | null>(null);
+  const [healthResult, setHealthResult] = useState<ProbeResult | null>(null);
 
   const health: HealthItem[] = [
     {
@@ -183,6 +184,24 @@ const SettingsPage = () => {
     } catch (e) {
       const error = e instanceof Error ? e.message : 'Unknown error';
       setSSEResult({ ok: false, clientError: error, clientErrorType: 'exception', failurePoint: 'sse_stream_init' });
+    }
+    setProbing(null);
+  };
+
+  const handleHealthProbe = async () => {
+    setProbing('health');
+    setHealthResult(null);
+    try {
+      const result = await runHealthProbe();
+      setHealthResult(result);
+      if (result.ok) {
+        toast.success(`Proxy reachable (${result.latencyMs}ms)`);
+      } else {
+        toast.error(result.clientError || `Proxy returned ${result.status}`);
+      }
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'Unknown error';
+      setHealthResult({ ok: false, clientError: error, clientErrorType: 'exception', failurePoint: 'proxy_health' });
     }
     setProbing(null);
   };
@@ -346,7 +365,15 @@ const SettingsPage = () => {
           Run probes to test connectivity through the server-side proxy. Session key: <span className="font-mono text-foreground">{sessionKey}</span>
         </p>
 
-        <div className="flex gap-2 mb-4">
+        <div className="flex flex-wrap gap-2 mb-4">
+          <button
+            onClick={handleHealthProbe}
+            disabled={probing !== null}
+            className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+          >
+            {probing === 'health' ? <Loader2 className="w-3 h-3 animate-spin" /> : <HeartPulse className="w-3 h-3" />}
+            Test Proxy Only
+          </button>
           <button
             onClick={handleBasicProbe}
             disabled={probing !== null || !config.enabled}
@@ -366,10 +393,11 @@ const SettingsPage = () => {
         </div>
 
         {!config.enabled && (
-          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run probes.</p>
+          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. The proxy health check works regardless.</p>
         )}
 
         <div className="space-y-3">
+          {healthResult && <ProbeDiagnostics result={healthResult} probeType="Proxy health" />}
           {basicResult && <ProbeDiagnostics result={basicResult} probeType="Basic (history)" />}
           {sseResult && <ProbeDiagnostics result={sseResult} probeType="SSE (follow=1)" />}
         </div>
