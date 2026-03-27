@@ -184,7 +184,7 @@ async function callProxyJson({ method = 'GET', params = {}, body, timeoutMs = 10
     return normalizeProbeResult(
       response,
       requestUrl,
-      requestMethod,
+      method,
       requestHeadersSent,
       rawText,
       parsedBody,
