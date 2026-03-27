@@ -1,5 +1,5 @@
 import { getConfig } from './config';
-import { supabase } from '@/integrations/supabase/client';
+
 import type { OpenClawSession, OpenClawMessage } from './types';
 
 /**
