@@ -1,5 +1,4 @@
 import { getConfig } from './config';
-
 import type { OpenClawSession, OpenClawMessage } from './types';
 
 /**
@@ -30,6 +29,20 @@ function proxyHeaders(): Record<string, string> {
 }
 
 /**
+ * Classify an error into a specific label instead of generic "Failed to fetch".
+ */
+function classifyError(e: unknown): string {
+  if (e instanceof TypeError && (e as TypeError).message === 'Failed to fetch') {
+    return 'Network error — could not reach the proxy. Check CORS or connectivity.';
+  }
+  if (e instanceof DOMException && e.name === 'AbortError') {
+    return 'Request timed out';
+  }
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/**
  * Fetch session history via the proxy edge function.
  */
 export async function fetchSessionHistory(
@@ -45,7 +58,7 @@ export async function fetchSessionHistory(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    const detail = body.error || `${res.status} ${res.statusText}`;
+    const detail = body.error || body.errorLabel || `${res.status} ${res.statusText}`;
     throw new Error(detail);
   }
   return res.json();
@@ -86,7 +99,7 @@ export function subscribeSessionSSE(
 
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        onError?.(new Error(body.error || `SSE proxy error: ${res.status}`));
+        onError?.(new Error(body.error || body.errorLabel || `SSE proxy error: ${res.status}`));
         if (!controller.signal.aborted) {
           setTimeout(() => { if (!controller.signal.aborted) connect(); }, 5000);
         }
@@ -112,7 +125,7 @@ export function subscribeSessionSSE(
             try {
               const data = JSON.parse(line.slice(6)) as OpenClawMessage;
               onMessage(data);
-            } catch (e) {
+            } catch {
               // Skip non-JSON SSE lines
             }
           }
@@ -120,7 +133,7 @@ export function subscribeSessionSSE(
       }
     } catch (e) {
       if (!controller.signal.aborted) {
-        onError?.(e instanceof Error ? e : new Error(String(e)));
+        onError?.(new Error(classifyError(e)));
         setTimeout(() => { if (!controller.signal.aborted) connect(); }, 5000);
       }
     }
@@ -130,71 +143,104 @@ export function subscribeSessionSSE(
   return controller;
 }
 
-export interface TestConnectionResult {
+// ─── Probe / Diagnostic types ────────────────────────────────────────
+
+export interface ProbeResult {
   ok: boolean;
-  latency: number;
   status?: number;
   statusText?: string;
+  errorLabel?: string | null;
   endpoint?: string;
+  encodedPath?: string;
   authApplied?: boolean;
   authMode?: string;
+  latencyMs?: number;
+  failurePoint?: string;
   bodySnippet?: string;
-  error?: string;
+  parsedBody?: unknown;
+  diagnostics?: Record<string, unknown>;
+  // client-side meta
+  proxyUrl?: string;
+  sessionKeyRaw?: string;
+  sessionKeyEncoded?: string;
+  clientError?: string;
+  clientErrorType?: string;
 }
 
 /**
- * Test connectivity via the proxy edge function.
+ * Run a basic probe (no SSE) through the proxy.
  */
-export async function testConnection(): Promise<TestConnectionResult> {
-  const config = getConfig();
+export async function runBasicProbe(sessionKey: string): Promise<ProbeResult> {
   const start = performance.now();
-
+  const url = proxyUrl({ sessionKey, probe: 'basic' });
   try {
-    const res = await fetch(
-      proxyUrl({ sessionKey: config.sessionKeys[0] || 'test', test: '1' }),
-      {
-        headers: proxyHeaders(),
-        signal: AbortSignal.timeout(8000),
-      }
-    );
-
+    const res = await fetch(url, {
+      headers: proxyHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
     const latency = Math.round(performance.now() - start);
     const body = await res.json().catch(() => ({}));
-
-    if (!res.ok) {
-      return {
-        ok: false,
-        latency,
-        status: body.status || res.status,
-        statusText: body.statusText || res.statusText,
-        endpoint: body.endpoint,
-        authApplied: body.authApplied,
-        authMode: body.authMode,
-        bodySnippet: body.bodySnippet || body.error,
-        error: body.error || `HTTP ${res.status}`,
-      };
-    }
-
-    // Proxy returns diagnostic info in test mode
-    const upstreamOk = body.status >= 200 && body.status < 400;
     return {
-      ok: upstreamOk,
-      latency,
-      status: body.status,
-      statusText: body.statusText,
-      endpoint: body.endpoint,
-      authApplied: body.authApplied,
-      authMode: body.authMode,
-      bodySnippet: body.bodySnippet,
-      error: upstreamOk ? undefined : `Upstream returned ${body.status}: ${body.bodySnippet?.slice(0, 100)}`,
+      ...body,
+      latencyMs: body.latencyMs ?? latency,
+      proxyUrl: url,
+      sessionKeyRaw: sessionKey,
+      sessionKeyEncoded: encodeURIComponent(sessionKey),
     };
   } catch (e) {
     return {
       ok: false,
-      latency: Math.round(performance.now() - start),
-      error: e instanceof Error ? e.message : 'Connection failed',
+      latencyMs: Math.round(performance.now() - start),
+      proxyUrl: url,
+      sessionKeyRaw: sessionKey,
+      sessionKeyEncoded: encodeURIComponent(sessionKey),
+      clientError: classifyError(e),
+      clientErrorType: e instanceof TypeError ? 'network' : e instanceof DOMException ? 'timeout' : 'unknown',
     };
   }
+}
+
+/**
+ * Run an SSE probe through the proxy (tests follow=1 initialization).
+ */
+export async function runSSEProbe(sessionKey: string): Promise<ProbeResult> {
+  const start = performance.now();
+  const url = proxyUrl({ sessionKey, probe: 'sse' });
+  try {
+    const res = await fetch(url, {
+      headers: proxyHeaders(),
+      signal: AbortSignal.timeout(12000),
+    });
+    const latency = Math.round(performance.now() - start);
+    const body = await res.json().catch(() => ({}));
+    return {
+      ...body,
+      latencyMs: body.latencyMs ?? latency,
+      proxyUrl: url,
+      sessionKeyRaw: sessionKey,
+      sessionKeyEncoded: encodeURIComponent(sessionKey),
+      failurePoint: body.failurePoint ?? 'sse_stream_init',
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      latencyMs: Math.round(performance.now() - start),
+      proxyUrl: url,
+      sessionKeyRaw: sessionKey,
+      sessionKeyEncoded: encodeURIComponent(sessionKey),
+      clientError: classifyError(e),
+      clientErrorType: e instanceof TypeError ? 'network' : e instanceof DOMException ? 'timeout' : 'unknown',
+      failurePoint: 'sse_stream_init',
+    };
+  }
+}
+
+/**
+ * Legacy test connection (wraps basic probe).
+ */
+export async function testConnection(): Promise<ProbeResult> {
+  const config = getConfig();
+  return runBasicProbe(config.sessionKeys[0] || 'test');
 }
 
 /**
@@ -204,7 +250,6 @@ export async function sendPrompt(
   prompt: string,
   opts?: { sessionKey?: string }
 ): Promise<unknown> {
-  // For now, POST goes direct — can be proxied later if needed
   const config = getConfig();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (opts?.sessionKey) headers['x-openclaw-session-key'] = opts.sessionKey;
