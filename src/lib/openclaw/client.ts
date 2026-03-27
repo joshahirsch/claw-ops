@@ -6,8 +6,8 @@ import type { OpenClawSession, OpenClawMessage } from './types';
  * Build the proxy function URL for the openclaw-proxy edge function.
  */
 function proxyUrl(params: Record<string, string>): string {
-  const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID;
-  const base = `https://${projectId}.supabase.co/functions/v1/openclaw-proxy`;
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
+  const base = `${supabaseUrl}/functions/v1/openclaw-proxy`;
   const search = new URLSearchParams(params);
   return `${base}?${search}`;
 }
