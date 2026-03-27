@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap } from 'lucide-react';
 import { getConfig, saveConfig, type OpenClawConfig, type AuthMode } from '@/lib/openclaw/config';
-import { runBasicProbe, runSSEProbe, type ProbeResult } from '@/lib/openclaw/client';
+import { runBasicProbe, runSSEProbe, runHealthProbe, type ProbeResult } from '@/lib/openclaw/client';
 import { toast } from 'sonner';
 
 interface HealthItem {

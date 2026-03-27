@@ -14,12 +14,22 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
+    const probeType = url.searchParams.get('probe'); // 'health' | 'basic' | 'sse' | 'test'
+
+    // Health probe — does not require any config
+    if (probeType === 'health') {
+      console.log('[openclaw-proxy] Health probe hit');
+      return new Response(
+        JSON.stringify({ ok: true, function: 'openclaw-proxy', timestamp: new Date().toISOString() }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const sessionKey = url.searchParams.get('sessionKey');
     const follow = url.searchParams.get('follow');
     const limit = url.searchParams.get('limit');
     const cursor = url.searchParams.get('cursor');
     const includeTools = url.searchParams.get('includeTools');
-    const probeType = url.searchParams.get('probe'); // 'basic' | 'sse' | 'test'
 
     const openclawBaseUrl = req.headers.get('x-openclaw-base-url') || '';
     const authMode = req.headers.get('x-openclaw-auth-mode') || 'none';

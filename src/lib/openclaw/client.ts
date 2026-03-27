@@ -236,6 +236,44 @@ export async function runSSEProbe(sessionKey: string): Promise<ProbeResult> {
 }
 
 /**
+ * Run a health probe that only checks if the proxy edge function is reachable.
+ * Does NOT contact OpenClaw upstream.
+ */
+export async function runHealthProbe(): Promise<ProbeResult> {
+  const start = performance.now();
+  const url = proxyUrl({ probe: 'health' });
+  try {
+    const res = await fetch(url, {
+      headers: { 'apikey': import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '' },
+      signal: AbortSignal.timeout(8000),
+    });
+    const latency = Math.round(performance.now() - start);
+    const body = await res.json().catch(() => ({}));
+    return {
+      ok: res.ok && body.ok === true,
+      status: res.status,
+      statusText: res.statusText,
+      latencyMs: latency,
+      proxyUrl: url,
+      parsedBody: body,
+      bodySnippet: JSON.stringify(body).slice(0, 500),
+      failurePoint: 'proxy_health',
+      clientError: res.ok ? undefined : `Proxy returned ${res.status}`,
+      clientErrorType: res.ok ? undefined : (res.status === 401 ? 'proxy_auth' : res.status === 403 ? 'proxy_forbidden' : 'proxy_error'),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      latencyMs: Math.round(performance.now() - start),
+      proxyUrl: url,
+      clientError: classifyError(e),
+      clientErrorType: e instanceof TypeError ? 'network_or_cors' : e instanceof DOMException ? 'timeout' : 'unknown',
+      failurePoint: 'proxy_health',
+    };
+  }
+}
+
+/**
  * Legacy test connection (wraps basic probe).
  */
 export async function testConnection(): Promise<ProbeResult> {
