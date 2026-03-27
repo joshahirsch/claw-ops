@@ -1,14 +1,22 @@
 import { getConfig } from './config';
 import type { OpenClawSession, OpenClawMessage } from './types';
 
+interface ProxyRequestOptions {
+  method?: 'GET' | 'POST';
+  params?: Record<string, string>;
+  body?: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
 /**
  * Build the proxy function URL for the openclaw-proxy edge function.
  */
-function proxyUrl(params: Record<string, string>): string {
+function proxyUrl(params: Record<string, string> = {}): string {
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
   const base = `${supabaseUrl}/functions/v1/openclaw-proxy`;
   const search = new URLSearchParams(params);
-  return `${base}?${search}`;
+  const query = search.toString();
+  return query ? `${base}?${query}` : base;
 }
 
 /**
@@ -28,18 +36,176 @@ function proxyHeaders(): Record<string, string> {
   };
 }
 
+function browserHeaders(method: 'GET' | 'POST', includeBody: boolean): Record<string, string> {
+  const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
+  return includeBody
+    ? {
+        'apikey': anonKey,
+        'Content-Type': 'application/json',
+      }
+    : {
+        'apikey': anonKey,
+      };
+}
+
+function labelFromStatus(status?: number): string | undefined {
+  if (status === undefined) return undefined;
+  if (status === 401) return '401 Unauthorized';
+  if (status === 403) return '403 Forbidden';
+  if (status === 404) return '404 Not Found';
+  if (status === 422) return '422 Invalid session key/path';
+  if (status >= 500) return '5xx Proxy or upstream error';
+  return undefined;
+}
+
 /**
  * Classify an error into a specific label instead of generic "Failed to fetch".
  */
-function classifyError(e: unknown): string {
-  if (e instanceof TypeError && (e as TypeError).message === 'Failed to fetch') {
-    return 'Network error — could not reach the proxy. Check CORS or connectivity.';
-  }
+function classifyError(e: unknown): { message: string; type: string } {
   if (e instanceof DOMException && e.name === 'AbortError') {
-    return 'Request timed out';
+    return { message: 'network timeout', type: 'timeout' };
   }
-  if (e instanceof Error) return e.message;
-  return String(e);
+
+  if (e instanceof TypeError) {
+    return { message: 'function unreachable or CORS blocked', type: 'network_or_cors' };
+  }
+
+  if (e instanceof Error) {
+    const lowered = e.message.toLowerCase();
+    if (lowered.includes('timeout') || lowered.includes('abort')) {
+      return { message: 'network timeout', type: 'timeout' };
+    }
+    return { message: e.message, type: 'exception' };
+  }
+
+  return { message: String(e), type: 'unknown' };
+}
+
+function buildProbePayload(probe: 'basic' | 'sse') {
+  const config = getConfig();
+  return {
+    probe,
+    baseUrl: config.baseUrl,
+    sessionKey: config.sessionKeys[0] || 'test',
+    authMode: config.authMode,
+    authToken: config.authToken,
+    authHeaderName: config.authHeaderName,
+    authHeaderPrefix: config.authHeaderPrefix,
+  };
+}
+
+function normalizeProbeResult(
+  response: Response,
+  requestUrl: string,
+  requestMethod: 'GET' | 'POST',
+  requestHeadersSent: Record<string, string>,
+  rawText: string,
+  parsedBody: Record<string, unknown> | null,
+  fallbackFailurePoint: string,
+  startedAt: number
+): ProbeResult {
+  const upstreamStatus = typeof parsedBody?.upstreamStatus === 'number'
+    ? parsedBody.upstreamStatus
+    : typeof parsedBody?.status === 'number'
+      ? parsedBody.status
+      : undefined;
+
+  const latency = Math.round(performance.now() - startedAt);
+
+  return {
+    ...(parsedBody ?? {}),
+    ok: typeof parsedBody?.ok === 'boolean' ? parsedBody.ok : response.ok,
+    proxyUrl: requestUrl,
+    endpoint: typeof parsedBody?.upstreamUrl === 'string'
+      ? parsedBody.upstreamUrl
+      : typeof parsedBody?.endpoint === 'string'
+        ? parsedBody.endpoint
+        : undefined,
+    requestMethod,
+    requestHeadersSent,
+    proxyHttpStatus: response.status,
+    proxyStatusText: response.statusText,
+    upstreamStatus,
+    status: upstreamStatus,
+    statusText: typeof parsedBody?.statusText === 'string' ? parsedBody.statusText : undefined,
+    latencyMs: typeof parsedBody?.latencyMs === 'number' ? parsedBody.latencyMs : latency,
+    failurePoint: typeof parsedBody?.failurePoint === 'string' ? parsedBody.failurePoint : fallbackFailurePoint,
+    bodySnippet: typeof parsedBody?.bodySnippet === 'string' ? parsedBody.bodySnippet : rawText.slice(0, 500),
+    parsedBody: parsedBody?.parsedBody ?? parsedBody ?? undefined,
+    errorLabel:
+      (typeof parsedBody?.errorLabel === 'string' && parsedBody.errorLabel) ||
+      (typeof parsedBody?.message === 'string' && parsedBody.message) ||
+      labelFromStatus(upstreamStatus) ||
+      labelFromStatus(response.status),
+    clientError:
+      typeof parsedBody?.message === 'string' && !parsedBody.ok
+        ? parsedBody.message
+        : !response.ok
+          ? `Function returned ${response.status}`
+          : undefined,
+    clientErrorType:
+      typeof parsedBody?.errorType === 'string'
+        ? parsedBody.errorType
+        : !response.ok
+          ? response.status === 401
+            ? 'function_unauthorized'
+            : response.status === 403
+              ? 'function_forbidden'
+              : response.status >= 500
+                ? 'function_exception'
+                : 'function_error'
+          : undefined,
+    rawErrorObject: parsedBody?.rawErrorObject,
+  };
+}
+
+async function callProxyJson({ method = 'GET', params = {}, body, timeoutMs = 10000 }: ProxyRequestOptions): Promise<ProbeResult> {
+  const requestUrl = proxyUrl(params);
+  const requestHeadersSent = browserHeaders(method, Boolean(body));
+  const startedAt = performance.now();
+
+  try {
+    const response = await fetch(requestUrl, {
+      method,
+      headers: requestHeadersSent,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const rawText = await response.text();
+    let parsedBody: Record<string, unknown> | null = null;
+
+    try {
+      parsedBody = rawText ? JSON.parse(rawText) as Record<string, unknown> : null;
+    } catch {
+      parsedBody = null;
+    }
+
+    return normalizeProbeResult(
+      response,
+      requestUrl,
+      method,
+      requestHeadersSent,
+      rawText,
+      parsedBody,
+      (params.probe as string) || (typeof body?.probe === 'string' ? body.probe : 'proxy_request'),
+      startedAt
+    );
+  } catch (e) {
+    const classified = classifyError(e);
+    return {
+      ok: false,
+      proxyUrl: requestUrl,
+      requestMethod: method,
+      requestHeadersSent,
+      latencyMs: Math.round(performance.now() - startedAt),
+      failurePoint: (params.probe as string) || (typeof body?.probe === 'string' ? body.probe : 'proxy_request'),
+      clientError: classified.message,
+      clientErrorType: classified.type,
+      errorLabel: classified.message,
+      rawErrorObject: e instanceof Error ? { name: e.name, message: e.message, stack: e.stack } : { value: String(e) },
+    };
+  }
 }
 
 /**
@@ -133,7 +299,7 @@ export function subscribeSessionSSE(
       }
     } catch (e) {
       if (!controller.signal.aborted) {
-        onError?.(new Error(classifyError(e)));
+        onError?.(new Error(classifyError(e).message));
         setTimeout(() => { if (!controller.signal.aborted) connect(); }, 5000);
       }
     }
@@ -147,11 +313,17 @@ export function subscribeSessionSSE(
 
 export interface ProbeResult {
   ok: boolean;
+  stage?: string;
+  errorType?: string;
+  message?: string;
   status?: number;
   statusText?: string;
   errorLabel?: string | null;
   endpoint?: string;
-  encodedPath?: string;
+  upstreamUrl?: string;
+  proxyRouteInvoked?: string;
+  sessionKeyRaw?: string;
+  sessionKeyEncoded?: string;
   authApplied?: boolean;
   authMode?: string;
   latencyMs?: number;
@@ -159,80 +331,61 @@ export interface ProbeResult {
   bodySnippet?: string;
   parsedBody?: unknown;
   diagnostics?: Record<string, unknown>;
-  // client-side meta
   proxyUrl?: string;
-  sessionKeyRaw?: string;
-  sessionKeyEncoded?: string;
+  proxyHttpStatus?: number;
+  proxyStatusText?: string;
+  upstreamStatus?: number;
+  requestMethod?: string;
+  requestHeadersSent?: Record<string, string>;
+  headersReceived?: Record<string, string>;
+  queryParamsReceived?: Record<string, string>;
+  optionsHit?: boolean;
+  requestBodyReceived?: Record<string, unknown>;
   clientError?: string;
   clientErrorType?: string;
+  rawErrorObject?: unknown;
 }
 
 /**
  * Run a basic probe (no SSE) through the proxy.
  */
 export async function runBasicProbe(sessionKey: string): Promise<ProbeResult> {
-  const start = performance.now();
-  const url = proxyUrl({ sessionKey, probe: 'basic' });
-  try {
-    const res = await fetch(url, {
-      headers: proxyHeaders(),
-      signal: AbortSignal.timeout(10000),
-    });
-    const latency = Math.round(performance.now() - start);
-    const body = await res.json().catch(() => ({}));
-    return {
-      ...body,
-      latencyMs: body.latencyMs ?? latency,
-      proxyUrl: url,
-      sessionKeyRaw: sessionKey,
-      sessionKeyEncoded: encodeURIComponent(sessionKey),
-    };
-  } catch (e) {
-    return {
-      ok: false,
-      latencyMs: Math.round(performance.now() - start),
-      proxyUrl: url,
-      sessionKeyRaw: sessionKey,
-      sessionKeyEncoded: encodeURIComponent(sessionKey),
-      clientError: classifyError(e),
-      clientErrorType: e instanceof TypeError ? 'network' : e instanceof DOMException ? 'timeout' : 'unknown',
-    };
-  }
+  const payload = buildProbePayload('basic');
+  payload.sessionKey = sessionKey;
+
+  const result = await callProxyJson({
+    method: 'POST',
+    body: payload,
+    timeoutMs: 10000,
+  });
+
+  return {
+    ...result,
+    sessionKeyRaw: result.sessionKeyRaw ?? sessionKey,
+    sessionKeyEncoded: result.sessionKeyEncoded ?? encodeURIComponent(sessionKey),
+    failurePoint: result.failurePoint ?? 'session_history_fetch',
+  };
 }
 
 /**
  * Run an SSE probe through the proxy (tests follow=1 initialization).
  */
 export async function runSSEProbe(sessionKey: string): Promise<ProbeResult> {
-  const start = performance.now();
-  const url = proxyUrl({ sessionKey, probe: 'sse' });
-  try {
-    const res = await fetch(url, {
-      headers: proxyHeaders(),
-      signal: AbortSignal.timeout(12000),
-    });
-    const latency = Math.round(performance.now() - start);
-    const body = await res.json().catch(() => ({}));
-    return {
-      ...body,
-      latencyMs: body.latencyMs ?? latency,
-      proxyUrl: url,
-      sessionKeyRaw: sessionKey,
-      sessionKeyEncoded: encodeURIComponent(sessionKey),
-      failurePoint: body.failurePoint ?? 'sse_stream_init',
-    };
-  } catch (e) {
-    return {
-      ok: false,
-      latencyMs: Math.round(performance.now() - start),
-      proxyUrl: url,
-      sessionKeyRaw: sessionKey,
-      sessionKeyEncoded: encodeURIComponent(sessionKey),
-      clientError: classifyError(e),
-      clientErrorType: e instanceof TypeError ? 'network' : e instanceof DOMException ? 'timeout' : 'unknown',
-      failurePoint: 'sse_stream_init',
-    };
-  }
+  const payload = buildProbePayload('sse');
+  payload.sessionKey = sessionKey;
+
+  const result = await callProxyJson({
+    method: 'POST',
+    body: payload,
+    timeoutMs: 12000,
+  });
+
+  return {
+    ...result,
+    sessionKeyRaw: result.sessionKeyRaw ?? sessionKey,
+    sessionKeyEncoded: result.sessionKeyEncoded ?? encodeURIComponent(sessionKey),
+    failurePoint: result.failurePoint ?? 'sse_stream_init',
+  };
 }
 
 /**
@@ -240,37 +393,32 @@ export async function runSSEProbe(sessionKey: string): Promise<ProbeResult> {
  * Does NOT contact OpenClaw upstream.
  */
 export async function runHealthProbe(): Promise<ProbeResult> {
-  const start = performance.now();
-  const url = proxyUrl({ probe: 'health' });
-  try {
-    const res = await fetch(url, {
-      headers: { 'apikey': import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '' },
-      signal: AbortSignal.timeout(8000),
-    });
-    const latency = Math.round(performance.now() - start);
-    const body = await res.json().catch(() => ({}));
-    return {
-      ok: res.ok && body.ok === true,
-      status: res.status,
-      statusText: res.statusText,
-      latencyMs: latency,
-      proxyUrl: url,
-      parsedBody: body,
-      bodySnippet: JSON.stringify(body).slice(0, 500),
-      failurePoint: 'proxy_health',
-      clientError: res.ok ? undefined : `Proxy returned ${res.status}`,
-      clientErrorType: res.ok ? undefined : (res.status === 401 ? 'proxy_auth' : res.status === 403 ? 'proxy_forbidden' : 'proxy_error'),
-    };
-  } catch (e) {
-    return {
-      ok: false,
-      latencyMs: Math.round(performance.now() - start),
-      proxyUrl: url,
-      clientError: classifyError(e),
-      clientErrorType: e instanceof TypeError ? 'network_or_cors' : e instanceof DOMException ? 'timeout' : 'unknown',
-      failurePoint: 'proxy_health',
-    };
-  }
+  return callProxyJson({
+    method: 'GET',
+    params: { probe: 'health' },
+    timeoutMs: 8000,
+  });
+}
+
+/**
+ * Run an echo probe to show exactly what the function received from the browser.
+ */
+export async function runEchoProbe(): Promise<ProbeResult> {
+  const config = getConfig();
+  const params: Record<string, string> = { probe: 'echo' };
+
+  if (config.baseUrl) params.baseUrl = config.baseUrl;
+  if (config.sessionKeys[0]) params.sessionKey = config.sessionKeys[0];
+  if (config.authMode) params.authMode = config.authMode;
+  if (config.authHeaderName) params.authHeaderName = config.authHeaderName;
+  if (config.authHeaderPrefix) params.authHeaderPrefix = config.authHeaderPrefix;
+  if (config.authToken) params.hasAuthToken = '1';
+
+  return callProxyJson({
+    method: 'GET',
+    params,
+    timeoutMs: 8000,
+  });
 }
 
 /**

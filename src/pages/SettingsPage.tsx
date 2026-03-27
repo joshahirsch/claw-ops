@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse } from 'lucide-react';
+import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse, Search } from 'lucide-react';
 import { getConfig, saveConfig, type OpenClawConfig, type AuthMode } from '@/lib/openclaw/config';
-import { runBasicProbe, runSSEProbe, runHealthProbe, type ProbeResult } from '@/lib/openclaw/client';
+import { runBasicProbe, runEchoProbe, runHealthProbe, runSSEProbe, type ProbeResult } from '@/lib/openclaw/client';
 import { toast } from 'sonner';
 
 interface HealthItem {
@@ -38,7 +38,22 @@ const statusIcon = (status: HealthItem['status']) => {
   }
 };
 
-const inputClass = "w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50";
+const inputClass = 'w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50';
+
+const prettyPrint = (value: unknown) => JSON.stringify(value, null, 2);
+
+const DiagnosticsBlock = ({ label, value }: { label: string; value: unknown }) => {
+  if (value === undefined || value === null) return null;
+
+  return (
+    <div>
+      <span className="text-muted-foreground">{label}:</span>
+      <pre className="mt-1 p-2 rounded bg-background/80 border border-border whitespace-pre-wrap break-all max-h-40 overflow-y-auto text-foreground">
+        {typeof value === 'string' ? value : prettyPrint(value)}
+      </pre>
+    </div>
+  );
+};
 
 /** Render a key-value row in the diagnostics panel */
 const DiagRow = ({ label, value, error }: { label: string; value: React.ReactNode; error?: boolean }) => (
@@ -53,7 +68,7 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
   const statusColor = result.ok ? 'border-success/20 bg-success/5' : 'border-destructive/20 bg-destructive/5';
   const statusLabel = result.ok
     ? `✓ ${probeType} probe passed`
-    : result.errorLabel || result.clientError || `✗ ${probeType} probe failed`;
+    : result.message || result.errorLabel || result.clientError || `✗ ${probeType} probe failed`;
 
   return (
     <div className={`rounded-md border p-3 text-xs font-mono space-y-2 ${statusColor}`}>
@@ -66,73 +81,56 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
 
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         <DiagRow label="Probe type" value={probeType} />
-        <DiagRow label="Failure point" value={result.failurePoint} />
-        <DiagRow label="Proxy URL" value={
-          <span className="break-all">{result.proxyUrl}</span>
-        } />
-        <DiagRow label="Upstream URL" value={
-          <span className="break-all">{result.endpoint}</span>
-        } />
+        <DiagRow label="Request method" value={result.requestMethod} />
+        <DiagRow label="Stage" value={result.stage} error={!result.ok && !!result.stage} />
+        <DiagRow label="Failure point" value={result.failurePoint} error={!result.ok && !!result.failurePoint} />
+        <DiagRow label="Proxy URL" value={<span className="break-all">{result.proxyUrl}</span>} />
+        <DiagRow label="Proxy route invoked" value={<span className="break-all">{result.proxyRouteInvoked}</span>} />
+        <DiagRow label="Upstream URL" value={<span className="break-all">{result.upstreamUrl || result.endpoint}</span>} />
         <DiagRow label="Session key (raw)" value={result.sessionKeyRaw} />
         <DiagRow label="Session key (encoded)" value={result.sessionKeyEncoded} />
         <DiagRow label="Auth mode" value={result.authMode || 'none'} />
-        <DiagRow label="Auth header attached" value={result.authApplied ? 'Yes' : 'No'} />
-        <DiagRow label="Upstream HTTP status" value={
-          result.status !== undefined ? `${result.status} ${result.statusText || ''}` : 'N/A'
-        } error={!!result.status && result.status >= 400} />
-        <DiagRow label="Error label" value={result.errorLabel} error={!!result.errorLabel} />
+        <DiagRow label="Auth header attached" value={typeof result.authApplied === 'boolean' ? (result.authApplied ? 'Yes' : 'No') : 'N/A'} />
+        <DiagRow
+          label="Function HTTP status"
+          value={result.proxyHttpStatus !== undefined ? `${result.proxyHttpStatus} ${result.proxyStatusText || ''}` : 'N/A'}
+          error={!!result.proxyHttpStatus && result.proxyHttpStatus >= 400}
+        />
+        <DiagRow
+          label="Upstream HTTP status"
+          value={result.upstreamStatus !== undefined ? `${result.upstreamStatus} ${result.statusText || ''}` : 'N/A'}
+          error={!!result.upstreamStatus && result.upstreamStatus >= 400}
+        />
+        <DiagRow label="Error type" value={result.errorType || result.clientErrorType} error={!!(result.errorType || result.clientErrorType)} />
+        <DiagRow label="Error label" value={result.errorLabel || result.message} error={!!(result.errorLabel || result.message)} />
         <DiagRow label="Latency" value={result.latencyMs !== undefined ? `${result.latencyMs}ms` : 'N/A'} />
+        <DiagRow label="OPTIONS hit" value={typeof result.optionsHit === 'boolean' ? (result.optionsHit ? 'Yes' : 'No') : 'N/A'} />
 
         {result.clientError && (
           <DiagRow label="Client error" value={result.clientError} error />
         )}
-        {result.clientErrorType && (
-          <DiagRow label="Client error type" value={result.clientErrorType} error />
-        )}
       </div>
 
-      {/* Response body snippet */}
-      {result.bodySnippet && (
-        <div>
-          <span className="text-muted-foreground">Response body snippet:</span>
-          <pre className="mt-1 p-2 rounded bg-background/80 border border-border whitespace-pre-wrap break-all max-h-32 overflow-y-auto text-foreground">
-            {result.bodySnippet}
-          </pre>
-        </div>
-      )}
-
-      {/* Parsed JSON error body */}
-      {result.parsedBody && typeof result.parsedBody === 'object' && (
-        <div>
-          <span className="text-muted-foreground">Parsed upstream JSON:</span>
-          <pre className="mt-1 p-2 rounded bg-background/80 border border-border whitespace-pre-wrap break-all max-h-32 overflow-y-auto text-foreground">
-            {JSON.stringify(result.parsedBody, null, 2)}
-          </pre>
-        </div>
-      )}
-
-      {/* Full diagnostics dump */}
-      {result.diagnostics && (
-        <details className="cursor-pointer">
-          <summary className="text-muted-foreground hover:text-foreground transition-colors">
-            Raw proxy diagnostics
-          </summary>
-          <pre className="mt-1 p-2 rounded bg-background/80 border border-border whitespace-pre-wrap break-all max-h-48 overflow-y-auto text-foreground">
-            {JSON.stringify(result.diagnostics, null, 2)}
-          </pre>
-        </details>
-      )}
+      <DiagnosticsBlock label="Browser request headers sent" value={result.requestHeadersSent} />
+      <DiagnosticsBlock label="Function headers received" value={result.headersReceived || result.diagnostics?.headersReceived} />
+      <DiagnosticsBlock label="Query params received" value={result.queryParamsReceived || result.diagnostics?.queryParamsReceived} />
+      <DiagnosticsBlock label="Request body received" value={result.requestBodyReceived || result.diagnostics?.requestBodyReceived} />
+      <DiagnosticsBlock label="Response body snippet" value={result.bodySnippet} />
+      <DiagnosticsBlock label="Parsed JSON" value={result.parsedBody} />
+      <DiagnosticsBlock label="Raw error object" value={result.rawErrorObject} />
+      <DiagnosticsBlock label="Raw proxy diagnostics" value={result.diagnostics} />
     </div>
   );
 };
 
 const SettingsPage = () => {
   const [config, setConfig] = useState<OpenClawConfig>(getConfig);
-  const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | null>(null);
+  const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | 'echo' | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'untested' | 'connected' | 'failed'>('untested');
   const [basicResult, setBasicResult] = useState<ProbeResult | null>(null);
   const [sseResult, setSSEResult] = useState<ProbeResult | null>(null);
   const [healthResult, setHealthResult] = useState<ProbeResult | null>(null);
+  const [echoResult, setEchoResult] = useState<ProbeResult | null>(null);
 
   const health: HealthItem[] = [
     {
@@ -141,10 +139,10 @@ const SettingsPage = () => {
       detail: config.enabled && connectionStatus === 'connected'
         ? `Connected, latency ${basicResult?.latencyMs}ms`
         : config.enabled && connectionStatus === 'failed'
-          ? basicResult?.errorLabel || basicResult?.clientError || 'Connection failed'
+          ? basicResult?.message || basicResult?.errorLabel || basicResult?.clientError || 'Connection failed'
           : 'Not configured',
     },
-    { label: 'Gateway Status', status: config.enabled && connectionStatus === 'connected' ? 'connected' : 'disconnected', detail: config.enabled ? config.baseUrl : 'No endpoint set' },
+    { label: 'Gateway Status', status: healthResult?.ok ? 'connected' : 'disconnected', detail: healthResult?.ok ? 'Proxy reachable' : config.enabled ? config.baseUrl : 'No endpoint set' },
     { label: 'Session Stream', status: config.enabled && sseResult?.ok ? 'connected' : 'disconnected', detail: config.enabled && sseResult?.ok ? 'SSE follow=1 OK' : 'Untested' },
   ];
 
@@ -160,7 +158,7 @@ const SettingsPage = () => {
       if (result.ok) {
         toast.success(`Basic probe passed (${result.latencyMs}ms)`);
       } else {
-        toast.error(result.errorLabel || result.clientError || 'Basic probe failed');
+        toast.error(result.message || result.errorLabel || result.clientError || 'Basic probe failed');
       }
     } catch (e) {
       const error = e instanceof Error ? e.message : 'Unknown error';
@@ -179,7 +177,7 @@ const SettingsPage = () => {
       if (result.ok) {
         toast.success(`SSE probe passed (${result.latencyMs}ms)`);
       } else {
-        toast.error(result.errorLabel || result.clientError || 'SSE probe failed');
+        toast.error(result.message || result.errorLabel || result.clientError || 'SSE probe failed');
       }
     } catch (e) {
       const error = e instanceof Error ? e.message : 'Unknown error';
@@ -197,11 +195,29 @@ const SettingsPage = () => {
       if (result.ok) {
         toast.success(`Proxy reachable (${result.latencyMs}ms)`);
       } else {
-        toast.error(result.clientError || `Proxy returned ${result.status}`);
+        toast.error(result.message || result.clientError || `Proxy returned ${result.proxyHttpStatus}`);
       }
     } catch (e) {
       const error = e instanceof Error ? e.message : 'Unknown error';
       setHealthResult({ ok: false, clientError: error, clientErrorType: 'exception', failurePoint: 'proxy_health' });
+    }
+    setProbing(null);
+  };
+
+  const handleEchoProbe = async () => {
+    setProbing('echo');
+    setEchoResult(null);
+    try {
+      const result = await runEchoProbe();
+      setEchoResult(result);
+      if (result.ok) {
+        toast.success('Echo probe captured browser request details');
+      } else {
+        toast.error(result.message || result.errorLabel || result.clientError || 'Echo probe failed');
+      }
+    } catch (e) {
+      const error = e instanceof Error ? e.message : 'Unknown error';
+      setEchoResult({ ok: false, clientError: error, clientErrorType: 'exception', failurePoint: 'echo_probe' });
     }
     setProbing(null);
   };
@@ -219,6 +235,7 @@ const SettingsPage = () => {
       setConnectionStatus('untested');
       setBasicResult(null);
       setSSEResult(null);
+      setEchoResult(null);
       toast.info('OpenClaw disconnected — using demo data');
     }
   };
@@ -230,7 +247,6 @@ const SettingsPage = () => {
         <p className="text-sm text-muted-foreground mt-0.5">System configuration and health</p>
       </div>
 
-      {/* OpenClaw Connection */}
       <div className="glass rounded-lg p-4">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
@@ -279,7 +295,6 @@ const SettingsPage = () => {
             />
           </div>
 
-          {/* Auth Configuration */}
           <div className="border-t border-border pt-3 mt-3">
             <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-2">Authentication</h3>
 
@@ -352,17 +367,15 @@ const SettingsPage = () => {
           </div>
 
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            All requests are routed through a server-side proxy to handle auth headers and avoid CORS issues.
-            Point the Base URL to your OpenClaw tunnel (e.g. <span className="font-mono text-primary/70">cloudflared</span>).
+            Diagnostics now send only standard browser headers to the proxy and render exactly what the browser sent versus what the function received.
           </p>
         </div>
       </div>
 
-      {/* Connection Diagnostics Panel */}
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Connection Diagnostics</h2>
         <p className="text-xs text-muted-foreground mb-3">
-          Run probes to test connectivity through the server-side proxy. Session key: <span className="font-mono text-foreground">{sessionKey}</span>
+          Run probes to isolate browser request shape, proxy reachability, and upstream history fetch behavior. Session key: <span className="font-mono text-foreground">{sessionKey}</span>
         </p>
 
         <div className="flex flex-wrap gap-2 mb-4">
@@ -373,6 +386,14 @@ const SettingsPage = () => {
           >
             {probing === 'health' ? <Loader2 className="w-3 h-3 animate-spin" /> : <HeartPulse className="w-3 h-3" />}
             Test Proxy Only
+          </button>
+          <button
+            onClick={handleEchoProbe}
+            disabled={probing !== null}
+            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+          >
+            {probing === 'echo' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
+            Run Echo Probe
           </button>
           <button
             onClick={handleBasicProbe}
@@ -393,17 +414,17 @@ const SettingsPage = () => {
         </div>
 
         {!config.enabled && (
-          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. The proxy health check works regardless.</p>
+          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. Proxy-only and echo probes work regardless.</p>
         )}
 
         <div className="space-y-3">
           {healthResult && <ProbeDiagnostics result={healthResult} probeType="Proxy health" />}
+          {echoResult && <ProbeDiagnostics result={echoResult} probeType="Echo request" />}
           {basicResult && <ProbeDiagnostics result={basicResult} probeType="Basic (history)" />}
           {sseResult && <ProbeDiagnostics result={sseResult} probeType="SSE (follow=1)" />}
         </div>
       </div>
 
-      {/* Environment Health */}
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Environment Health</h2>
         <div className="space-y-2">
@@ -428,7 +449,6 @@ const SettingsPage = () => {
         </div>
       </div>
 
-      {/* Tools */}
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Tools Enabled</h2>
         <div className="flex flex-wrap gap-2">
@@ -447,7 +467,6 @@ const SettingsPage = () => {
         </div>
       </div>
 
-      {/* Skills */}
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Skills Installed</h2>
         <div className="space-y-1.5">

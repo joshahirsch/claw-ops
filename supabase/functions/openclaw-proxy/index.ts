@@ -4,264 +4,437 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+type ErrorStage = 'proxy_fetch' | 'upstream_fetch' | 'response_parse';
+type ErrorType = 'network' | 'timeout' | 'unauthorized' | 'forbidden' | 'not_found' | 'invalid_path' | 'server_error' | 'exception';
+
+type ProbeType = 'health' | 'basic' | 'sse' | 'echo';
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
+function redactValue(key: string, value: string) {
+  return /authorization|auth-token|apikey/i.test(key) ? '[redacted]' : value;
+}
+
+function headersToObject(headers: Headers) {
+  return Object.fromEntries(Array.from(headers.entries()).map(([key, value]) => [key, redactValue(key, value)]));
+}
+
+function sanitizePayload(payload: Record<string, unknown>) {
+  const clone = { ...payload };
+  if (typeof clone.authToken === 'string' && clone.authToken.length > 0) {
+    clone.authToken = '[redacted]';
+  }
+  return clone;
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function parseBooleanParam(value: unknown): boolean {
+  return value === '1' || value === 'true' || value === true;
+}
+
+function buildErrorResponse(args: {
+  stage: ErrorStage;
+  errorType: ErrorType;
+  message: string;
+  upstreamUrl?: string;
+  upstreamStatus?: number;
+  status?: number;
+  diagnostics: Record<string, unknown>;
+  rawErrorObject?: unknown;
+}) {
+  return jsonResponse(
+    {
+      ok: false,
+      stage: args.stage,
+      errorType: args.errorType,
+      message: args.message,
+      upstreamUrl: args.upstreamUrl,
+      upstreamStatus: args.upstreamStatus,
+      rawErrorObject: args.rawErrorObject,
+      diagnostics: args.diagnostics,
+    },
+    args.status ?? 500,
+  );
+}
+
+function classifyUpstreamError(status: number): { errorType: ErrorType; message: string } {
+  if (status === 401) return { errorType: 'unauthorized', message: '401 Unauthorized' };
+  if (status === 403) return { errorType: 'forbidden', message: '403 Forbidden' };
+  if (status === 404) return { errorType: 'not_found', message: '404 Not Found' };
+  if (status === 422) return { errorType: 'invalid_path', message: '422 Invalid session key/path' };
+  if (status >= 500) return { errorType: 'server_error', message: '5xx Proxy or upstream error' };
+  return { errorType: 'exception', message: `${status} Upstream error` };
+}
+
+async function parseBody(req: Request, diagnostics: Record<string, unknown>) {
+  if (req.method !== 'POST' && req.method !== 'PUT' && req.method !== 'PATCH') {
+    return {} as Record<string, unknown>;
   }
 
-  const diagnostics: Record<string, unknown> = {
-    proxyTimestamp: new Date().toISOString(),
-  };
+  const rawText = await req.text();
+  diagnostics.requestBodySnippet = rawText.slice(0, 500);
+
+  if (!rawText) return {} as Record<string, unknown>;
 
   try {
-    const url = new URL(req.url);
-    const probeType = url.searchParams.get('probe'); // 'health' | 'basic' | 'sse' | 'test'
+    const parsed = JSON.parse(rawText) as Record<string, unknown>;
+    diagnostics.requestBodyReceived = sanitizePayload(parsed);
+    return parsed;
+  } catch (error) {
+    diagnostics.requestBodyParseError = error instanceof Error ? error.message : String(error);
+    return {} as Record<string, unknown>;
+  }
+}
 
-    // Health probe — does not require any config
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  const queryParams = Object.fromEntries(url.searchParams.entries());
+  const baseDiagnostics: Record<string, unknown> = {
+    proxyTimestamp: new Date().toISOString(),
+    method: req.method,
+    functionUrl: req.url,
+    proxyRouteInvoked: `${url.pathname}${url.search}`,
+    queryParamsReceived: queryParams,
+    headersReceived: headersToObject(req.headers),
+  };
+
+  if (req.method === 'OPTIONS') {
+    console.log('[openclaw-proxy] OPTIONS:', JSON.stringify(baseDiagnostics));
+    return jsonResponse(
+      {
+        ok: true,
+        function: 'openclaw-proxy',
+        method: 'OPTIONS',
+        optionsHit: true,
+        headersReceived: baseDiagnostics.headersReceived,
+        queryParamsReceived: queryParams,
+      },
+      200,
+    );
+  }
+
+  try {
+    const requestBody = await parseBody(req, baseDiagnostics);
+    const probeType = (asOptionalString(requestBody.probe) || url.searchParams.get('probe') || undefined) as ProbeType | undefined;
+
     if (probeType === 'health') {
       console.log('[openclaw-proxy] Health probe hit');
-      return new Response(
-        JSON.stringify({ ok: true, function: 'openclaw-proxy', timestamp: new Date().toISOString() }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+      return jsonResponse({ ok: true, function: 'openclaw-proxy', method: req.method, optionsHit: false }, 200);
     }
 
-    const sessionKey = url.searchParams.get('sessionKey');
-    const follow = url.searchParams.get('follow');
-    const limit = url.searchParams.get('limit');
-    const cursor = url.searchParams.get('cursor');
-    const includeTools = url.searchParams.get('includeTools');
+    const sessionKey = asOptionalString(requestBody.sessionKey) || url.searchParams.get('sessionKey') || undefined;
+    const follow = asOptionalString(requestBody.follow) || url.searchParams.get('follow') || undefined;
+    const limit = asOptionalString(requestBody.limit) || url.searchParams.get('limit') || undefined;
+    const cursor = asOptionalString(requestBody.cursor) || url.searchParams.get('cursor') || undefined;
+    const includeTools = parseBooleanParam(requestBody.includeTools) || url.searchParams.get('includeTools') === '1';
 
-    const openclawBaseUrl = req.headers.get('x-openclaw-base-url') || '';
-    const authMode = req.headers.get('x-openclaw-auth-mode') || 'none';
-    const authToken = req.headers.get('x-openclaw-auth-token') || '';
-    const authHeaderName = req.headers.get('x-openclaw-auth-header-name') || 'Authorization';
-    const authHeaderPrefix = req.headers.get('x-openclaw-auth-header-prefix') || 'Bearer ';
+    const openclawBaseUrl =
+      asOptionalString(requestBody.baseUrl) ||
+      asOptionalString(requestBody.openclawBaseUrl) ||
+      url.searchParams.get('baseUrl') ||
+      req.headers.get('x-openclaw-base-url') ||
+      '';
 
-    // Log incoming config (no secrets)
-    diagnostics.incomingConfig = {
+    const authMode =
+      asOptionalString(requestBody.authMode) ||
+      url.searchParams.get('authMode') ||
+      req.headers.get('x-openclaw-auth-mode') ||
+      'none';
+
+    const authToken =
+      asString(requestBody.authToken) ||
+      req.headers.get('x-openclaw-auth-token') ||
+      '';
+
+    const authHeaderName =
+      asOptionalString(requestBody.authHeaderName) ||
+      url.searchParams.get('authHeaderName') ||
+      req.headers.get('x-openclaw-auth-header-name') ||
+      'Authorization';
+
+    const authHeaderPrefix =
+      asOptionalString(requestBody.authHeaderPrefix) ||
+      url.searchParams.get('authHeaderPrefix') ||
+      req.headers.get('x-openclaw-auth-header-prefix') ||
+      'Bearer ';
+
+    baseDiagnostics.incomingConfig = {
+      probeType: probeType || 'none',
       baseUrl: openclawBaseUrl,
+      sessionKeyRaw: sessionKey,
       authMode,
       authHeaderName,
       authHeaderPrefix,
-      hasToken: !!authToken,
-      sessionKeyRaw: sessionKey,
-      sessionKeyEncoded: sessionKey ? encodeURIComponent(sessionKey) : null,
+      hasAuthToken: Boolean(authToken),
       follow,
-      probeType: probeType || 'none',
+      limit,
+      cursor,
+      includeTools,
     };
 
-    console.log('[openclaw-proxy] Request:', JSON.stringify(diagnostics.incomingConfig));
+    console.log('[openclaw-proxy] Incoming query params:', JSON.stringify(queryParams));
+    console.log('[openclaw-proxy] Incoming config summary:', JSON.stringify(baseDiagnostics.incomingConfig));
+
+    if (probeType === 'echo') {
+      return jsonResponse(
+        {
+          ok: true,
+          function: 'openclaw-proxy',
+          probe: 'echo',
+          method: req.method,
+          optionsHit: false,
+          headersReceived: baseDiagnostics.headersReceived,
+          queryParamsReceived: queryParams,
+          requestBodyReceived: baseDiagnostics.requestBodyReceived,
+          proxyRouteInvoked: baseDiagnostics.proxyRouteInvoked,
+          diagnostics: baseDiagnostics,
+        },
+        200,
+      );
+    }
 
     if (!openclawBaseUrl) {
-      diagnostics.error = 'Missing x-openclaw-base-url header';
-      return new Response(
-        JSON.stringify({ error: 'Missing x-openclaw-base-url header', diagnostics }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+      return buildErrorResponse({
+        stage: 'proxy_fetch',
+        errorType: 'exception',
+        message: 'Missing OpenClaw base URL',
+        status: 400,
+        diagnostics: baseDiagnostics,
+      });
     }
 
-    if (!sessionKey && !probeType) {
-      diagnostics.error = 'sessionKey query parameter is required';
-      return new Response(
-        JSON.stringify({ error: 'sessionKey query parameter is required', diagnostics }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+    if (!sessionKey) {
+      return buildErrorResponse({
+        stage: 'proxy_fetch',
+        errorType: 'invalid_path',
+        message: 'Missing session key',
+        status: 400,
+        diagnostics: baseDiagnostics,
+      });
     }
 
-    // Build upstream URL with proper encoding
     const baseUrl = openclawBaseUrl.replace(/\/+$/, '');
-    const encodedSessionKey = encodeURIComponent(sessionKey || 'test');
+    const encodedSessionKey = encodeURIComponent(sessionKey);
     const params = new URLSearchParams();
+    const isSSEProbe = probeType === 'sse';
 
-    const isSSEProbe = probeType === 'sse' || follow === '1';
-    const isBasicProbe = probeType === 'basic' || probeType === 'test';
-
-    if (isSSEProbe && probeType !== 'test') params.set('follow', '1');
-    if (limit) params.set('limit', limit);
-    if (cursor) params.set('cursor', cursor);
-    if (includeTools) params.set('includeTools', includeTools);
-    if (isBasicProbe && !limit) params.set('limit', '1');
+    if (isSSEProbe || follow === '1') params.set('follow', '1');
+    if (!probeType || probeType !== 'basic') {
+      if (limit) params.set('limit', limit);
+      if (cursor) params.set('cursor', cursor);
+      if (includeTools) params.set('includeTools', '1');
+    }
 
     const queryString = params.toString();
-    const targetUrl = `${baseUrl}/sessions/${encodedSessionKey}/history${queryString ? '?' + queryString : ''}`;
+    const targetUrl = `${baseUrl}/sessions/${encodedSessionKey}/history${queryString ? `?${queryString}` : ''}`;
 
-    diagnostics.upstreamUrl = targetUrl;
-    diagnostics.encodedPath = `/sessions/${encodedSessionKey}/history`;
+    baseDiagnostics.upstreamUrl = targetUrl;
+    baseDiagnostics.encodedPath = `/sessions/${encodedSessionKey}/history`;
+    baseDiagnostics.failurePoint = isSSEProbe ? 'sse_follow_probe' : 'session_history_fetch';
 
-    console.log('[openclaw-proxy] Upstream URL:', targetUrl);
+    console.log('[openclaw-proxy] Resolved upstream URL:', targetUrl);
 
-    // Build headers with auth
     const upstreamHeaders: Record<string, string> = {
-      'Accept': 'application/json',
+      Accept: 'application/json',
     };
     let authApplied = false;
 
     if (authMode === 'bearer' && authToken) {
-      upstreamHeaders['Authorization'] = `Bearer ${authToken}`;
+      upstreamHeaders.Authorization = `Bearer ${authToken}`;
       authApplied = true;
     } else if (authMode === 'custom' && authToken && authHeaderName) {
-      const prefix = authHeaderPrefix || '';
-      upstreamHeaders[authHeaderName] = prefix ? `${prefix}${authToken}` : authToken;
+      upstreamHeaders[authHeaderName] = authHeaderPrefix ? `${authHeaderPrefix}${authToken}` : authToken;
       authApplied = true;
     }
 
-    diagnostics.authApplied = authApplied;
-    diagnostics.authMode = authMode;
+    baseDiagnostics.authMode = authMode;
+    baseDiagnostics.authApplied = authApplied;
+    console.log('[openclaw-proxy] Auth mode used:', authMode);
+    console.log('[openclaw-proxy] Auth header attached:', String(authApplied));
 
-    const startTime = Date.now();
-    let upstreamRes: Response;
+    const fetchStartedAt = Date.now();
+    baseDiagnostics.fetchStart = new Date(fetchStartedAt).toISOString();
+    console.log('[openclaw-proxy] Fetch start:', baseDiagnostics.fetchStart);
 
+    let upstreamResponse: Response;
     try {
-      upstreamRes = await fetch(targetUrl, {
+      upstreamResponse = await fetch(targetUrl, {
         method: 'GET',
         headers: upstreamHeaders,
-        signal: AbortSignal.timeout(isSSEProbe ? 10000 : 10000),
+        signal: AbortSignal.timeout(isSSEProbe ? 12000 : 10000),
       });
-    } catch (fetchErr) {
-      const elapsed = Date.now() - startTime;
-      const message = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      const stack = fetchErr instanceof Error ? fetchErr.stack : undefined;
-      const isTimeout = message.includes('timeout') || message.includes('abort');
-      const isNetwork = message.includes('error sending request') || message.includes('connection');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      const lowered = message.toLowerCase();
+      const errorType: ErrorType = lowered.includes('timeout') || lowered.includes('abort') ? 'timeout' : 'network';
 
-      diagnostics.fetchError = { message, stack, isTimeout, isNetwork, elapsed };
-      console.error('[openclaw-proxy] Fetch error:', JSON.stringify(diagnostics.fetchError));
+      baseDiagnostics.caughtException = { message, stack };
+      console.error('[openclaw-proxy] Caught exception:', message, stack);
 
-      return new Response(
-        JSON.stringify({
-          error: isTimeout
-            ? 'Request timed out — is the OpenClaw instance reachable?'
-            : isNetwork
-              ? 'Network error — could not connect to the OpenClaw endpoint'
-              : `Proxy fetch error: ${message}`,
-          errorType: isTimeout ? 'timeout' : isNetwork ? 'network' : 'fetch_error',
-          failurePoint: isSSEProbe ? 'sse_stream_init' : 'session_history_fetch',
-          diagnostics,
-        }),
-        {
-          status: 502,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
+      return buildErrorResponse({
+        stage: 'proxy_fetch',
+        errorType,
+        message,
+        upstreamUrl: targetUrl,
+        status: 502,
+        diagnostics: baseDiagnostics,
+        rawErrorObject: { message, stack },
+      });
     }
 
-    const elapsed = Date.now() - startTime;
-    diagnostics.upstreamStatus = upstreamRes.status;
-    diagnostics.upstreamStatusText = upstreamRes.statusText;
-    diagnostics.latencyMs = elapsed;
+    const latencyMs = Date.now() - fetchStartedAt;
+    baseDiagnostics.upstreamStatus = upstreamResponse.status;
+    baseDiagnostics.statusText = upstreamResponse.statusText;
+    baseDiagnostics.latencyMs = latencyMs;
+    console.log('[openclaw-proxy] Fetch response status:', upstreamResponse.status);
 
-    console.log('[openclaw-proxy] Upstream response:', upstreamRes.status, upstreamRes.statusText, `${elapsed}ms`);
-
-    // For SSE follow mode (non-probe), pipe the stream
-    if (follow === '1' && !probeType && upstreamRes.ok && upstreamRes.body) {
-      return new Response(upstreamRes.body, {
+    if (follow === '1' && !probeType && upstreamResponse.ok && upstreamResponse.body) {
+      return new Response(upstreamResponse.body, {
         status: 200,
         headers: {
           ...corsHeaders,
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
+          Connection: 'keep-alive',
         },
       });
     }
 
-    // Read response body
-    const responseBody = await upstreamRes.text();
-    const bodySnippet = responseBody.slice(0, 500);
-    diagnostics.bodySnippet = bodySnippet;
+    const responseText = await upstreamResponse.text();
+    const bodySnippet = responseText.slice(0, 500);
+    baseDiagnostics.bodySnippet = bodySnippet;
+    console.log('[openclaw-proxy] First 500 chars of upstream body:', bodySnippet);
 
-    console.log('[openclaw-proxy] Response body (first 500):', bodySnippet);
-
-    // Try to parse as JSON for structured error surfacing
     let parsedBody: unknown = null;
     try {
-      parsedBody = JSON.parse(responseBody);
-    } catch {
-      // not JSON
+      parsedBody = responseText ? JSON.parse(responseText) : null;
+    } catch (error) {
+      if (probeType) {
+        baseDiagnostics.responseParseWarning = error instanceof Error ? error.message : String(error);
+      } else {
+        baseDiagnostics.caughtException = {
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        };
+        console.error('[openclaw-proxy] Caught exception:', baseDiagnostics.caughtException);
+        return buildErrorResponse({
+          stage: 'response_parse',
+          errorType: 'exception',
+          message: 'Failed to parse upstream JSON response',
+          upstreamUrl: targetUrl,
+          upstreamStatus: upstreamResponse.status,
+          status: 502,
+          diagnostics: baseDiagnostics,
+          rawErrorObject: baseDiagnostics.caughtException,
+        });
+      }
     }
 
-    // Classify error
-    const errorLabel = !upstreamRes.ok ? (
-      upstreamRes.status === 401 ? '401 Unauthorized' :
-      upstreamRes.status === 403 ? '403 Forbidden' :
-      upstreamRes.status === 404 ? '404 Not Found' :
-      upstreamRes.status === 422 ? '422 Invalid session key/path' :
-      upstreamRes.status >= 500 ? `${upstreamRes.status} Proxy or upstream error` :
-      `${upstreamRes.status} ${upstreamRes.statusText}`
-    ) : null;
-
-    diagnostics.errorLabel = errorLabel;
-    diagnostics.failurePoint = probeType === 'sse' ? 'sse_probe' : probeType === 'basic' ? 'basic_probe' : 'session_history_fetch';
-
-    // For probes, always return diagnostics
     if (probeType) {
-      return new Response(
-        JSON.stringify({
-          ok: upstreamRes.ok,
-          status: upstreamRes.status,
-          statusText: upstreamRes.statusText,
-          errorLabel,
-          endpoint: targetUrl,
-          encodedPath: `/sessions/${encodedSessionKey}/history`,
-          authApplied,
-          authMode,
-          latencyMs: elapsed,
-          failurePoint: diagnostics.failurePoint,
-          bodySnippet,
-          parsedBody: parsedBody,
-          diagnostics,
-        }),
-        {
-          status: 200, // always 200 for probes so the client can read the full diagnostic
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
-    }
+      if (!upstreamResponse.ok) {
+        const classified = classifyUpstreamError(upstreamResponse.status);
+        return jsonResponse(
+          {
+            ok: false,
+            stage: 'upstream_fetch',
+            errorType: classified.errorType,
+            message: classified.message,
+            proxyRouteInvoked: baseDiagnostics.proxyRouteInvoked,
+            upstreamUrl: targetUrl,
+            sessionKeyRaw: sessionKey,
+            sessionKeyEncoded: encodedSessionKey,
+            authMode,
+            authApplied,
+            proxyHttpStatus: 200,
+            upstreamStatus: upstreamResponse.status,
+            status: upstreamResponse.status,
+            statusText: upstreamResponse.statusText,
+            latencyMs,
+            failurePoint: baseDiagnostics.failurePoint,
+            bodySnippet,
+            parsedBody,
+            diagnostics: baseDiagnostics,
+          },
+          200,
+        );
+      }
 
-    if (!upstreamRes.ok) {
-      return new Response(
-        JSON.stringify({
-          error: errorLabel,
-          errorType: upstreamRes.status === 401 ? 'unauthorized' :
-            upstreamRes.status === 403 ? 'forbidden' :
-            upstreamRes.status === 404 ? 'not_found' :
-            upstreamRes.status === 422 ? 'invalid_path' :
-            upstreamRes.status >= 500 ? 'server_error' : 'http_error',
-          status: upstreamRes.status,
-          endpoint: targetUrl,
+      return jsonResponse(
+        {
+          ok: true,
+          stage: 'upstream_fetch',
+          proxyRouteInvoked: baseDiagnostics.proxyRouteInvoked,
+          upstreamUrl: targetUrl,
+          sessionKeyRaw: sessionKey,
+          sessionKeyEncoded: encodedSessionKey,
+          authMode,
+          authApplied,
+          proxyHttpStatus: 200,
+          upstreamStatus: upstreamResponse.status,
+          status: upstreamResponse.status,
+          statusText: upstreamResponse.statusText,
+          latencyMs,
+          failurePoint: baseDiagnostics.failurePoint,
           bodySnippet,
           parsedBody,
-          diagnostics,
-        }),
-        {
-          status: upstreamRes.status,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+          diagnostics: baseDiagnostics,
+        },
+        200,
       );
     }
 
-    // Success: return upstream JSON
-    return new Response(responseBody, {
-      status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : 'Unknown proxy error';
-    const stack = e instanceof Error ? e.stack : undefined;
-    diagnostics.caughtException = { message, stack };
-    console.error('[openclaw-proxy] Unhandled error:', message, stack);
+    if (!upstreamResponse.ok) {
+      const classified = classifyUpstreamError(upstreamResponse.status);
+      return buildErrorResponse({
+        stage: 'upstream_fetch',
+        errorType: classified.errorType,
+        message: classified.message,
+        upstreamUrl: targetUrl,
+        upstreamStatus: upstreamResponse.status,
+        status: upstreamResponse.status,
+        diagnostics: {
+          ...baseDiagnostics,
+          parsedBody,
+        },
+      });
+    }
 
-    return new Response(
-      JSON.stringify({
-        error: `Proxy error: ${message}`,
-        errorType: 'proxy_error',
-        diagnostics,
-      }),
-      {
-        status: 502,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
-    );
+    return new Response(responseText, {
+      status: 200,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : undefined;
+    baseDiagnostics.caughtException = { message, stack };
+    console.error('[openclaw-proxy] Caught exception:', message, stack);
+
+    return buildErrorResponse({
+      stage: 'proxy_fetch',
+      errorType: 'exception',
+      message,
+      status: 500,
+      diagnostics: baseDiagnostics,
+      rawErrorObject: { message, stack },
+    });
   }
 });
