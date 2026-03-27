@@ -24,10 +24,25 @@ export async function fetchSessionHistory(
 }
 
 /**
+ * Fetch multiple sessions in parallel.
+ */
+export async function fetchAllSessions(
+  sessionKeys: string[],
+  opts?: { includeTools?: boolean }
+): Promise<OpenClawSession[]> {
+  const results = await Promise.allSettled(
+    sessionKeys.map((key) => fetchSessionHistory(key, { includeTools: opts?.includeTools ?? true }))
+  );
+  return results
+    .filter((r): r is PromiseFulfilledResult<OpenClawSession> => r.status === 'fulfilled')
+    .map((r) => r.value);
+}
+
+/**
  * Subscribe to live session updates via SSE (follow=1).
  * Returns an AbortController to cancel the stream.
  */
-export function subscribeSession(
+export function subscribeSessionSSE(
   sessionKey: string,
   onMessage: (msg: OpenClawMessage) => void,
   onError?: (err: Error) => void
@@ -50,7 +65,6 @@ export function subscribeSession(
     eventSource.onerror = () => {
       eventSource.close();
       if (!controller.signal.aborted) {
-        // Reconnect after 3s
         setTimeout(() => {
           if (!controller.signal.aborted) connect();
         }, 3000);
@@ -74,7 +88,6 @@ export async function testConnection(): Promise<{ ok: boolean; latency: number; 
       signal: AbortSignal.timeout(5000),
     });
     const latency = Math.round(performance.now() - start);
-    // Even a 404 means the server is reachable
     return { ok: res.ok || res.status === 404, latency };
   } catch (e) {
     return {
@@ -86,7 +99,7 @@ export async function testConnection(): Promise<{ ok: boolean; latency: number; 
 }
 
 /**
- * Send a prompt to OpenClaw via POST /v1/responses (optional).
+ * Send a prompt to OpenClaw via POST /v1/responses.
  */
 export async function sendPrompt(
   prompt: string,
