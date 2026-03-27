@@ -1,14 +1,23 @@
 /**
  * Transforms normalized OpenClaw session data into ClawOps app types.
+ *
+ * Data sources (in priority order):
+ *   1. GET /sessions/{key}/history  — gateway API
+ *   2. SSE follow=1 / WebSocket    — live incremental updates
+ *   3. JSONL transcript files       — offline fallback
+ *
+ * All paths normalise into the same OpenClawSession shape before
+ * this adapter converts to Agent / ActivityEvent.
  */
-import type { OpenClawSession, OpenClawMessage } from './types';
+import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
 import type { Agent, AgentState, AgentAction, ActivityEvent, Severity } from '@/data/types';
+
+// ─── Session → Agent ────────────────────────────────────────────────
 
 function phaseToState(phase: string, messages: OpenClawMessage[]): AgentState {
   const lastMsg = messages[messages.length - 1];
   if (phase === 'waiting') return 'awaiting_approval';
   if (phase === 'idle') {
-    // If there are messages, it completed; otherwise idle
     return messages.length > 0 ? 'complete' : 'idle';
   }
   // running — infer sub-state from last message
@@ -37,10 +46,10 @@ function messageToAction(msg: OpenClawMessage): AgentAction {
   };
 }
 
-export function sessionToAgent(session: OpenClawSession, index: number): Agent {
+export function sessionToAgent(session: OpenClawSession): Agent {
   const { messages, status } = session;
   const state = phaseToState(status.phase, messages);
-  const lastToolMsg = [...messages].reverse().find(m => m.role === 'toolResult');
+  const lastToolMsg = [...messages].reverse().find((m) => m.role === 'toolResult');
   const firstMsg = messages[0];
   const lastMsg = messages[messages.length - 1];
 
@@ -60,6 +69,8 @@ export function sessionToAgent(session: OpenClawSession, index: number): Agent {
   };
 }
 
+// ─── Messages → Activity Events ─────────────────────────────────────
+
 export function messageToActivityEvent(msg: OpenClawMessage, session: OpenClawSession): ActivityEvent {
   const time = new Date(msg.timestamp);
   const severity: Severity = msg.role === 'toolResult' && msg.toolOutput?.includes('error') ? 'high' : 'low';
@@ -76,13 +87,76 @@ export function messageToActivityEvent(msg: OpenClawMessage, session: OpenClawSe
   };
 }
 
+// ─── Batch helpers ───────────────────────────────────────────────────
+
 export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
-  return sessions.map((s, i) => sessionToAgent(s, i));
+  return sessions.map((s) => sessionToAgent(s));
 }
 
 export function sessionsToActivity(sessions: OpenClawSession[], maxItems = 20): ActivityEvent[] {
   return sessions
-    .flatMap(s => s.messages.map(m => messageToActivityEvent(m, s)))
+    .flatMap((s) => s.messages.map((m) => messageToActivityEvent(m, s)))
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
     .slice(0, maxItems);
+}
+
+// ─── JSONL Fallback Normaliser ───────────────────────────────────────
+
+/**
+ * Normalise raw JSONL transcript entries (from disk files) into
+ * the standard OpenClawMessage shape so the same adapter works.
+ */
+export function normaliseTranscriptEntry(entry: RawTranscriptEntry): OpenClawMessage | null {
+  const type = entry.type;
+  // Skip non-message entry types
+  if (type === 'session_header' || type === 'compaction' || type === 'branch_summary') {
+    return null;
+  }
+
+  // Map the raw entry into our normalized message shape
+  return {
+    id: (entry.id as string) || crypto.randomUUID(),
+    parentId: (entry.parentId as string) ?? null,
+    type: type as OpenClawMessage['type'],
+    role: normaliseRole(entry),
+    content: (entry.content as string | Record<string, unknown>) ?? '',
+    timestamp: (entry.timestamp as string) || new Date().toISOString(),
+    toolName: entry.toolName as string | undefined,
+    toolInput: entry.toolInput as Record<string, unknown> | undefined,
+    toolOutput: entry.toolOutput as string | undefined,
+  };
+}
+
+function normaliseRole(entry: RawTranscriptEntry): OpenClawMessage['role'] {
+  const role = entry.role as string | undefined;
+  if (role === 'user') return 'user';
+  if (role === 'assistant') return 'assistant';
+  if (role === 'toolResult' || entry.type === 'custom_message') return 'toolResult';
+  return 'assistant';
+}
+
+/**
+ * Convert an array of raw JSONL lines into a normalised OpenClawSession.
+ * Used when reading transcript files from disk as a fallback.
+ */
+export function jsonlToSession(
+  sessionKey: string,
+  lines: RawTranscriptEntry[]
+): OpenClawSession {
+  const messages = lines
+    .map(normaliseTranscriptEntry)
+    .filter((m): m is OpenClawMessage => m !== null);
+
+  const lastTimestamp = messages[messages.length - 1]?.timestamp || new Date().toISOString();
+
+  return {
+    sessionKey,
+    sessionId: sessionKey,
+    updatedAt: lastTimestamp,
+    messages,
+    status: {
+      phase: 'idle', // file-based = not live
+      tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0 },
+    },
+  };
 }

@@ -121,30 +121,53 @@ const SettingsPage = () => {
 
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-muted-foreground font-mono block mb-1">Base URL</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={config.baseUrl}
-                onChange={(e) => setConfig({ ...config, baseUrl: e.target.value })}
-                placeholder="http://localhost:3000"
-                className="flex-1 px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
-              />
-              <button
-                onClick={handleSave}
-                className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors"
-              >
-                Save
-              </button>
-              <button
-                onClick={handleTest}
-                disabled={testing || !config.enabled}
-                className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
-              >
-                {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-                Test
-              </button>
-            </div>
+            <label className="text-xs text-muted-foreground font-mono block mb-1">Base URL (HTTP)</label>
+            <input
+              type="text"
+              value={config.baseUrl}
+              onChange={(e) => setConfig({ ...config, baseUrl: e.target.value })}
+              placeholder="http://localhost:3000"
+              className="w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground font-mono block mb-1">WebSocket URL</label>
+            <input
+              type="text"
+              value={config.wsUrl}
+              onChange={(e) => setConfig({ ...config, wsUrl: e.target.value })}
+              placeholder="ws://localhost:3000"
+              className="w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground font-mono block mb-1">Session Keys (comma-separated)</label>
+            <input
+              type="text"
+              value={config.sessionKeys.join(', ')}
+              onChange={(e) => setConfig({ ...config, sessionKeys: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+              placeholder="default"
+              className="w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-foreground font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={handleSave}
+              className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors"
+            >
+              Save
+            </button>
+            <button
+              onClick={handleTest}
+              disabled={testing || !config.enabled}
+              className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+            >
+              {testing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+              Test
+            </button>
           </div>
 
           {connectionStatus !== 'untested' && (
