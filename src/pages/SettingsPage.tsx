@@ -128,10 +128,11 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
 
 const SettingsPage = () => {
   const [config, setConfig] = useState<OpenClawConfig>(getConfig);
-  const [probing, setProbing] = useState<'basic' | 'sse' | null>(null);
+  const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'untested' | 'connected' | 'failed'>('untested');
   const [basicResult, setBasicResult] = useState<ProbeResult | null>(null);
   const [sseResult, setSSEResult] = useState<ProbeResult | null>(null);
+  const [healthResult, setHealthResult] = useState<ProbeResult | null>(null);
 
   const health: HealthItem[] = [
     {
