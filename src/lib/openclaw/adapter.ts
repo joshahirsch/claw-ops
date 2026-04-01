@@ -319,6 +319,17 @@ function rootSupervisionEvent(
   };
 }
 
+function supervisionEventToAction(event: ActivityEvent & { sortTimestamp: string }): AgentAction & { sortTimestamp: string } {
+  return {
+    id: event.id,
+    timestamp: event.timestamp,
+    type: event.type === 'approval_request' ? 'approval_request' : event.type === 'error' || event.type === 'stalled' ? 'error' : 'reasoning',
+    description: event.message,
+    actorLabel: event.agentName,
+    sortTimestamp: event.sortTimestamp,
+  };
+}
+
 function buildRootSupervisionEvents(
   node: WalterSessionTreeNode,
   session: OpenClawSession,
@@ -384,9 +395,35 @@ function buildRootSupervisionEvents(
   return events;
 }
 
+function buildAgentActions(
+  session: OpenClawSession,
+  agentName: string,
+  node: WalterSessionTreeNode,
+  childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+  staleSessionSummary?: StaleSessionSummary,
+): AgentAction[] {
+  const messageActions = session.messages.map((message) => ({
+    ...messageToAction(message, agentName),
+    sortTimestamp: message.timestamp,
+  }));
+
+  if (node.agent !== 'walter') {
+    return messageActions.slice(-10).map(({ sortTimestamp, ...action }) => action);
+  }
+
+  const supervisionActions = buildRootSupervisionEvents(node, session, childRollup, conflictSummary, staleSessionSummary)
+    .map(supervisionEventToAction);
+
+  return [...messageActions, ...supervisionActions]
+    .sort((a, b) => b.sortTimestamp.localeCompare(a.sortTimestamp))
+    .slice(0, 10)
+    .map(({ sortTimestamp, ...action }) => action);
+}
+
 export function sessionToAgent(
   session: OpenClawSession,
-  node: WalterSessionNode,
+  node: WalterSessionTreeNode,
   childCount = 0,
   parentAgentName?: string,
   rootAgentName?: string,
@@ -414,7 +451,7 @@ export function sessionToAgent(
     objective: sessionObjective(messages, node, parentAgentName),
     blockers: buildAgentBlockers(state, node, childRollup, conflictSummary, staleSessionSummary),
     approvalNeeded: state === 'awaiting_approval' || (childRollup?.waiting ?? 0) > 0 || degraded,
-    actions: messages.slice(-10).map((message) => messageToAction(message, agentName)),
+    actions: buildAgentActions(session, agentName, node, childRollup, conflictSummary, staleSessionSummary),
     agentKind: node.agent,
     displayRole: buildDisplayRole(node),
     parentAgentName,
@@ -556,82 +593,4 @@ export function jsonlToSession(
       tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0 },
     },
   };
-}
-
-export function sessionsToApprovals(sessions: OpenClawSession[]): import('@/data/types').Approval[] {
-  const { nodeMap } = buildNodeMaps(sessions);
-  return sessions
-    .filter((s) => {
-      const state = phaseToState(s.status.phase, s.messages);
-      return state === 'awaiting_approval';
-    })
-    .map((s) => {
-      const node = nodeMap.get(s.sessionKey);
-      const agentName = node ? buildAgentName(node) : s.sessionKey;
-      const lastMsg = s.messages[s.messages.length - 1];
-      return {
-        id: `${s.sessionKey}:approval`,
-        agentName,
-        agentId: s.sessionKey,
-        action: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 120) : 'Approval requested',
-        reason: 'Agent requires human approval to proceed.',
-        timestamp: formatClockTime(s.updatedAt),
-        status: 'pending' as const,
-      };
-    });
-}
-
-export function sessionsToFailures(sessions: OpenClawSession[]): import('@/data/types').Failure[] {
-  const { nodeMap } = buildNodeMaps(sessions);
-  return sessions
-    .filter((s) => {
-      const state = phaseToState(s.status.phase, s.messages);
-      return state === 'error' || state === 'stalled';
-    })
-    .map((s) => {
-      const node = nodeMap.get(s.sessionKey);
-      const agentName = node ? buildAgentName(node) : s.sessionKey;
-      const state = phaseToState(s.status.phase, s.messages);
-      const lastMsg = s.messages[s.messages.length - 1];
-      return {
-        id: `${s.sessionKey}:failure`,
-        agentName,
-        agentId: s.sessionKey,
-        severity: (state === 'error' ? 'high' : 'medium') as Severity,
-        cause: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 200) : 'Unknown error',
-        recommendedAction: state === 'stalled' ? 'Review stalled session and restart if needed.' : 'Investigate error and retry.',
-        status: state === 'error' ? 'failed' as const : 'blocked' as const,
-        timestamp: formatClockTime(s.updatedAt),
-        task: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 80) : 'Unknown task',
-      };
-    });
-}
-
-export function sessionsToReplaySessions(sessions: OpenClawSession[]): import('@/data/types').ReplaySession[] {
-  const { nodeMap } = buildNodeMaps(sessions);
-  return sessions
-    .filter((s) => s.messages.length >= 2)
-    .map((s) => {
-      const node = nodeMap.get(s.sessionKey);
-      const agentName = node ? buildAgentName(node) : s.sessionKey;
-      const firstMsg = s.messages[0];
-      const lastMsg = s.messages[s.messages.length - 1];
-      const state = phaseToState(s.status.phase, s.messages);
-      return {
-        id: s.sessionKey,
-        agentName,
-        task: typeof firstMsg?.content === 'string' ? firstMsg.content.slice(0, 80) : 'Session',
-        startTime: formatClockTime(firstMsg.timestamp),
-        endTime: formatClockTime(lastMsg.timestamp),
-        status: (state === 'error' ? 'failed' : 'completed') as 'completed' | 'failed',
-        steps: s.messages.slice(0, 50).map((msg, i) => ({
-          id: msg.id,
-          timestamp: formatClockTime(msg.timestamp),
-          type: (msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'thinking' : 'thinking') as import('@/data/types').ReplayStep['type'],
-          description: typeof msg.content === 'string' ? msg.content.slice(0, 120) : 'Step ' + (i + 1),
-          tool: msg.toolName,
-          duration: '—',
-        })),
-      };
-    });
 }
