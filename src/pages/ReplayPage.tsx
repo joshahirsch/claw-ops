@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { mockReplaySessions } from '@/data/mockData';
+import { useOpenClawData } from '@/hooks/useOpenClawData';
+import { sessionsToReplaySessions } from '@/lib/openclaw/adapter';
 import { Play, CheckCircle, XCircle, Bot, Wrench, ShieldCheck, Brain, AlertTriangle } from 'lucide-react';
 import { ReplaySession } from '@/data/types';
 
@@ -12,6 +14,8 @@ const stepIcons: Record<string, typeof Bot> = {
 };
 
 const ReplayPage = () => {
+  const { sessions, isLoading, error, usingMockData } = useOpenClawData();
+  const replaySessions = usingMockData ? mockReplaySessions : sessionsToReplaySessions(sessions);
   const [selected, setSelected] = useState<ReplaySession | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
 
@@ -24,37 +28,55 @@ const ReplayPage = () => {
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-xl font-semibold text-foreground">Replay</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">Review completed runs step by step</p>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          {usingMockData ? 'Demo replay sessions' : 'Replay derived from OpenClaw session history'}
+        </p>
       </div>
 
-      {/* Session List */}
-      <div className="grid grid-cols-2 gap-3">
-        {mockReplaySessions.map(session => (
-          <button
-            key={session.id}
-            onClick={() => handleSelect(session)}
-            className={`glass rounded-lg p-4 text-left transition-all hover:border-primary/30 ${selected?.id === session.id ? 'border-primary/40 bg-primary/5' : ''}`}
-          >
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-medium text-foreground">{session.task}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{session.agentName}</p>
+      {error && (
+        <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
+          Connection error: {error}
+        </div>
+      )}
+
+      {isLoading && replaySessions.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">Loading replay sessions…</div>
+      )}
+
+      {!isLoading && replaySessions.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">
+          No replayable sessions are available yet.
+        </div>
+      )}
+
+      {replaySessions.length > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          {replaySessions.map((session) => (
+            <button
+              key={session.id}
+              onClick={() => handleSelect(session)}
+              className={`glass rounded-lg p-4 text-left transition-all hover:border-primary/30 ${selected?.id === session.id ? 'border-primary/40 bg-primary/5' : ''}`}
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-sm font-medium text-foreground">{session.task}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{session.agentName}</p>
+                </div>
+                {session.status === 'completed' ? (
+                  <CheckCircle className="w-4 h-4 text-success shrink-0" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-destructive shrink-0" />
+                )}
               </div>
-              {session.status === 'completed' ? (
-                <CheckCircle className="w-4 h-4 text-success shrink-0" />
-              ) : (
-                <XCircle className="w-4 h-4 text-destructive shrink-0" />
-              )}
-            </div>
-            <div className="flex items-center gap-3 mt-2 text-[11px] font-mono text-muted-foreground">
-              <span>{session.startTime} → {session.endTime}</span>
-              <span>{session.steps.length} steps</span>
-            </div>
-          </button>
-        ))}
-      </div>
+              <div className="flex items-center gap-3 mt-2 text-[11px] font-mono text-muted-foreground">
+                <span>{session.startTime} → {session.endTime}</span>
+                <span>{session.steps.length} steps</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
 
-      {/* Replay View */}
       {selected && (
         <div className="glass rounded-lg p-5">
           <div className="flex items-center justify-between mb-4">
@@ -83,7 +105,6 @@ const ReplayPage = () => {
             </div>
           </div>
 
-          {/* Scrubber */}
           <div className="relative mb-6">
             <div className="h-1 bg-secondary rounded-full">
               <div
@@ -109,7 +130,6 @@ const ReplayPage = () => {
             </div>
           </div>
 
-          {/* Current Step Detail */}
           <div className="bg-background/50 rounded-lg p-4">
             <div className="flex items-center gap-3 mb-2">
               {(() => {

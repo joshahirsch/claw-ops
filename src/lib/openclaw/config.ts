@@ -1,4 +1,7 @@
+import { useSyncExternalStore } from 'react';
+
 const STORAGE_KEY = 'openclaw-config';
+const CONFIG_EVENT = 'openclaw-config-changed';
 
 export type AuthMode = 'none' | 'bearer' | 'custom';
 
@@ -24,17 +27,52 @@ const defaultConfig: OpenClawConfig = {
   authHeaderPrefix: 'Bearer ',
 };
 
-export function getConfig(): OpenClawConfig {
+function readConfig(): OpenClawConfig {
+  if (typeof window === 'undefined') return defaultConfig;
+
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY);
     if (raw) return { ...defaultConfig, ...JSON.parse(raw) };
   } catch {
     // ignore
   }
+
   return defaultConfig;
 }
 
+function emitConfigChanged() {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(CONFIG_EVENT));
+}
+
+export function getConfig(): OpenClawConfig {
+  return readConfig();
+}
+
 export function saveConfig(config: Partial<OpenClawConfig>): void {
-  const current = getConfig();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...current, ...config }));
+  const current = readConfig();
+  const next = { ...current, ...config };
+
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  }
+
+  emitConfigChanged();
+}
+
+function subscribe(onStoreChange: () => void): () => void {
+  if (typeof window === 'undefined') return () => undefined;
+
+  const handleChange = () => onStoreChange();
+  window.addEventListener(CONFIG_EVENT, handleChange);
+  window.addEventListener('storage', handleChange);
+
+  return () => {
+    window.removeEventListener(CONFIG_EVENT, handleChange);
+    window.removeEventListener('storage', handleChange);
+  };
+}
+
+export function useOpenClawConfig(): OpenClawConfig {
+  return useSyncExternalStore(subscribe, readConfig, () => defaultConfig);
 }
