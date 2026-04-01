@@ -10,7 +10,7 @@
  * this adapter converts to Agent / ActivityEvent / ReplaySession.
  */
 import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
-import type { Agent, AgentState, AgentAction, ActivityEvent, Severity, ReplaySession, ReplayStep } from '@/data/types';
+import type { Agent, AgentState, AgentAction, ActivityEvent, Severity, ReplaySession, ReplayStep, Approval, Failure } from '@/data/types';
 
 function formatClock(iso: string): string {
   const time = new Date(iso);
@@ -119,6 +119,29 @@ function messageToAction(msg: OpenClawMessage): AgentAction {
   };
 }
 
+function latestErrorMessage(session: OpenClawSession): OpenClawMessage | undefined {
+  return [...session.messages].reverse().find(hasErrorSignal);
+}
+
+function approvalReason(session: OpenClawSession): string {
+  const latestAssistant = [...session.messages].reverse().find((msg) => msg.role === 'assistant');
+  const latestTool = [...session.messages].reverse().find((msg) => msg.role === 'toolResult');
+  return safeString(latestAssistant?.content, safeString(latestTool?.content, 'Session paused pending human approval.')).slice(0, 200);
+}
+
+function failureCause(session: OpenClawSession): string {
+  const err = latestErrorMessage(session);
+  if (err) return safeString(err.content, err.toolOutput || 'Recent session activity indicates an error.').slice(0, 200);
+  if (phaseToState(session) === 'stalled') return 'No recent session activity detected while the session remains active.';
+  return 'Session entered a failure state.';
+}
+
+function failureRecommendedAction(state: AgentState): string {
+  if (state === 'stalled') return 'Inspect the session timeline, confirm upstream connectivity, and retry the blocked step.';
+  if (state === 'error') return 'Inspect the last tool result or assistant message, verify upstream dependencies, and rerun after correction.';
+  return 'Review the session trace before retrying.';
+}
+
 export function sessionToAgent(session: OpenClawSession): Agent {
   const { messages } = session;
   const state = phaseToState(session);
@@ -225,6 +248,38 @@ export function sessionToReplaySession(session: OpenClawSession): ReplaySession 
   };
 }
 
+export function sessionToApproval(session: OpenClawSession): Approval | null {
+  if (session.status.phase !== 'waiting') return null;
+
+  return {
+    id: `approval-${session.sessionKey}`,
+    agentName: sessionDisplayName(session),
+    agentId: session.sessionKey,
+    action: sessionCurrentTask(session),
+    reason: approvalReason(session),
+    timestamp: formatClock(session.updatedAt),
+    status: 'pending',
+    notes: 'Read-only view in pass 2A. Action wiring comes later.',
+  };
+}
+
+export function sessionToFailure(session: OpenClawSession): Failure | null {
+  const state = phaseToState(session);
+  if (!['error', 'stalled'].includes(state)) return null;
+
+  return {
+    id: `failure-${session.sessionKey}`,
+    agentName: sessionDisplayName(session),
+    agentId: session.sessionKey,
+    severity: state === 'error' ? 'high' : 'medium',
+    cause: failureCause(session),
+    recommendedAction: failureRecommendedAction(state),
+    status: state === 'error' ? 'failed' : 'blocked',
+    timestamp: formatClock(session.updatedAt),
+    task: sessionCurrentTask(session),
+  };
+}
+
 export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
   return sessions.map((s) => sessionToAgent(s));
 }
@@ -243,6 +298,20 @@ export function sessionsToReplaySessions(sessions: OpenClawSession[], maxItems =
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, maxItems)
     .map((session) => sessionToReplaySession(session));
+}
+
+export function sessionsToApprovals(sessions: OpenClawSession[]): Approval[] {
+  return sessions
+    .map((session) => sessionToApproval(session))
+    .filter((approval): approval is Approval => approval !== null)
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+export function sessionsToFailures(sessions: OpenClawSession[]): Failure[] {
+  return sessions
+    .map((session) => sessionToFailure(session))
+    .filter((failure): failure is Failure => failure !== null)
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 }
 
 /**
