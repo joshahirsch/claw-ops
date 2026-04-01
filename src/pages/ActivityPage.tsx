@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { mockActivity } from '@/data/mockData';
 import { Bot, Wrench, AlertTriangle, ShieldCheck, CheckCircle, MessageSquare, Pause, Search } from 'lucide-react';
+import { useOpenClawData } from '@/hooks/useOpenClawData';
 import { Severity } from '@/data/types';
 
 const typeIcons: Record<string, typeof Bot> = {
@@ -8,7 +8,9 @@ const typeIcons: Record<string, typeof Bot> = {
   tool_use: Wrench,
   error: AlertTriangle,
   approval_request: ShieldCheck,
+  approval: ShieldCheck,
   completed: CheckCircle,
+  complete: CheckCircle,
   incoming: MessageSquare,
   stalled: Pause,
 };
@@ -23,8 +25,9 @@ const severityColors: Record<Severity, string> = {
 const ActivityPage = () => {
   const [search, setSearch] = useState('');
   const [severityFilter, setSeverityFilter] = useState<Severity | 'all'>('all');
+  const { activity, isLoading, error, usingMockData } = useOpenClawData();
 
-  const filtered = mockActivity.filter(e => {
+  const filtered = activity.filter((e) => {
     if (search && !e.message.toLowerCase().includes(search.toLowerCase()) && !e.agentName.toLowerCase().includes(search.toLowerCase())) return false;
     if (severityFilter !== 'all' && e.severity !== severityFilter) return false;
     return true;
@@ -34,7 +37,9 @@ const ActivityPage = () => {
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-xl font-semibold text-foreground">Activity</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">Live event stream</p>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          {usingMockData ? 'Demo activity stream' : 'Live event stream'}
+        </p>
       </div>
 
       <div className="flex items-center gap-3">
@@ -48,7 +53,7 @@ const ActivityPage = () => {
             className="w-full pl-9 pr-4 py-2 rounded-md bg-secondary border border-border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
           />
         </div>
-        {(['all', 'low', 'medium', 'high'] as const).map(s => (
+        {(['all', 'low', 'medium', 'high'] as const).map((s) => (
           <button
             key={s}
             onClick={() => setSeverityFilter(s)}
@@ -59,8 +64,24 @@ const ActivityPage = () => {
         ))}
       </div>
 
+      {error && (
+        <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
+          Connection error: {error}
+        </div>
+      )}
+
+      {isLoading && activity.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">Loading activity…</div>
+      )}
+
+      {!isLoading && filtered.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">
+          No activity events matched your current filters.
+        </div>
+      )}
+
       <div className="space-y-1">
-        {filtered.map(event => {
+        {filtered.map((event) => {
           const Icon = typeIcons[event.type] || Bot;
           return (
             <div key={event.id} className="glass rounded-md p-3 flex items-start gap-3 hover:bg-card/80 transition-colors">
