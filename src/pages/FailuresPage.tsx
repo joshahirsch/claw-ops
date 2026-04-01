@@ -1,4 +1,6 @@
 import { mockFailures } from '@/data/mockData';
+import { useOpenClawData } from '@/hooks/useOpenClawData';
+import { sessionsToFailures } from '@/lib/openclaw/adapter';
 import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { Severity } from '@/data/types';
 
@@ -17,25 +19,46 @@ const statusChip: Record<string, string> = {
 };
 
 const FailuresPage = () => {
+  const { sessions, isLoading, error, usingMockData } = useOpenClawData();
+  const failures = usingMockData ? mockFailures : sessionsToFailures(sessions);
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-xl font-semibold text-foreground">Failures</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">{mockFailures.length} issues</p>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          {usingMockData ? 'Demo failures view' : 'Live derived operational issues'} · {failures.length} issues
+        </p>
       </div>
 
+      {error && (
+        <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
+          Connection error: {error}
+        </div>
+      )}
+
+      {isLoading && failures.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">Loading failures…</div>
+      )}
+
+      {!isLoading && failures.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">
+          No live failures are currently derived from the active session set.
+        </div>
+      )}
+
       <div className="space-y-3">
-        {mockFailures.map(failure => (
+        {failures.map((failure) => (
           <div key={failure.id} className="glass rounded-lg p-4">
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex items-start gap-3">
+            <div className="flex items-start justify-between mb-3 gap-3">
+              <div className="flex items-start gap-3 min-w-0">
                 <AlertTriangle className="w-5 h-5 text-destructive mt-0.5 shrink-0" />
-                <div>
+                <div className="min-w-0">
                   <p className="text-sm font-medium text-foreground">{failure.task}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">{failure.agentName} · {failure.timestamp}</p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-full border ${severityBadge[failure.severity]}`}>
                   {failure.severity}
                 </span>
