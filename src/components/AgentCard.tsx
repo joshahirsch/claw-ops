@@ -1,6 +1,6 @@
 import { Agent } from '@/data/types';
 import StateIndicator from './StateIndicator';
-import { Clock, Wrench, Gauge, GitBranch, Layers3 } from 'lucide-react';
+import { Clock, Wrench, Gauge, GitBranch, Layers3, AlertTriangle } from 'lucide-react';
 
 interface AgentCardProps {
   agent: Agent;
@@ -10,6 +10,7 @@ interface AgentCardProps {
 const AgentCard = ({ agent, onClick }: AgentCardProps) => {
   const confidenceColor = agent.confidence >= 0.8 ? 'text-success' : agent.confidence >= 0.5 ? 'text-warning' : 'text-destructive';
   const showRollup = !agent.hierarchy?.isSubSession && agent.childRollup;
+  const showConflict = !agent.hierarchy?.isSubSession && agent.conflictSummary?.detected;
 
   return (
     <button
@@ -37,6 +38,12 @@ const AgentCard = ({ agent, onClick }: AgentCardProps) => {
             <div className="flex items-center gap-1 mt-1 text-[10px] font-mono text-primary/80">
               <Layers3 className="w-3 h-3" />
               {agent.childRollup.summary}
+            </div>
+          )}
+          {showConflict && (
+            <div className="flex items-center gap-1 mt-1 text-[10px] font-mono text-warning">
+              <AlertTriangle className="w-3 h-3" />
+              {agent.conflictSummary?.summary}
             </div>
           )}
         </div>

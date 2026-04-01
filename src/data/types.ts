@@ -28,6 +28,13 @@ export interface ChildSessionRollup {
   summary: string;
 }
 
+export interface ConflictSummary {
+  detected: boolean;
+  severity: 'medium' | 'high';
+  summary: string;
+  conflictingAgentKinds: string[];
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -47,6 +54,7 @@ export interface Agent {
   rootAgentName?: string;
   hierarchy?: AgentHierarchy;
   childRollup?: ChildSessionRollup;
+  conflictSummary?: ConflictSummary;
 }
 
 export interface AgentAction {

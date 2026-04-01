@@ -10,10 +10,8 @@
  * this adapter converts to Agent / ActivityEvent.
  */
 import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
-import type { Agent, AgentState, AgentAction, ActivityEvent, ChildSessionRollup, Severity } from '@/data/types';
+import type { Agent, AgentState, AgentAction, ActivityEvent, ChildSessionRollup, ConflictSummary, Severity } from '@/data/types';
 import { buildWalterSessionTree, sessionsToWalterNodes, type WalterSessionNode, type WalterSessionTreeNode } from './subagents';
-
-// ─── Session → Agent ────────────────────────────────────────────────
 
 function phaseToState(phase: string, messages: OpenClawMessage[]): AgentState {
   const lastMsg = messages[messages.length - 1];
@@ -151,10 +149,68 @@ function buildChildRollup(
   };
 }
 
+function normalizeConflictText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/walter:[a-z_]+/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+function buildConflictSummary(
+  node: WalterSessionTreeNode,
+  sessionMap: Map<string, OpenClawSession>,
+): ConflictSummary | undefined {
+  if (node.agent !== 'walter') return undefined;
+
+  const descendants = collectDescendants(node);
+  if (descendants.length < 2) return undefined;
+
+  const byAgentKind = new Map<string, string[]>();
+
+  descendants.forEach((child) => {
+    const session = sessionMap.get(child.sessionKey);
+    if (!session) return;
+    const state = phaseToState(session.status.phase, session.messages);
+    if (state !== 'complete') return;
+
+    const lastMessage = session.messages[session.messages.length - 1];
+    const currentTask = typeof lastMessage?.content === 'string'
+      ? lastMessage.content
+      : JSON.stringify(lastMessage?.content ?? '');
+    const normalized = normalizeConflictText(currentTask);
+    if (!normalized) return;
+
+    const kind = child.agent;
+    const existing = byAgentKind.get(kind) ?? [];
+    if (!existing.includes(normalized)) existing.push(normalized);
+    byAgentKind.set(kind, existing);
+  });
+
+  const conflictingAgentKinds = Array.from(byAgentKind.entries())
+    .filter(([, values]) => values.length > 1)
+    .map(([kind]) => kind);
+
+  if (conflictingAgentKinds.length === 0) return undefined;
+
+  const severity = conflictingAgentKinds.length > 1 ? 'high' : 'medium';
+  const summary = `Possible conflicting child results detected across ${conflictingAgentKinds.join(', ').replace(/_/g, ' ')}.`;
+
+  return {
+    detected: true,
+    severity,
+    summary,
+    conflictingAgentKinds,
+  };
+}
+
 function buildAgentBlockers(
   state: AgentState,
   node: WalterSessionNode,
   childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
 ): string[] {
   const blockers: string[] = [];
   if (state === 'awaiting_approval') blockers.push('Awaiting human approval');
@@ -167,12 +223,22 @@ function buildAgentBlockers(
     if (childRollup.stalled > 0) blockers.push(`${childRollup.stalled} child sub-session(s) are stalled.`);
   }
 
+  if (conflictSummary?.detected) {
+    blockers.push(conflictSummary.summary);
+  }
+
   return blockers;
 }
 
-function buildCurrentTask(lastMessageText: string | undefined, node: WalterSessionNode, childRollup?: ChildSessionRollup): string {
+function buildCurrentTask(
+  lastMessageText: string | undefined,
+  node: WalterSessionNode,
+  childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+): string {
   const fallback = lastMessageText || 'Processing…';
   if (node.agent !== 'walter' || !childRollup) return fallback.slice(0, 80);
+  if (conflictSummary?.detected) return 'Reviewing conflicting child sub-session results'.slice(0, 80);
 
   const waitingSuffix = childRollup.waiting > 0 ? ` · waiting on ${childRollup.waiting} child` : '';
   return `Coordinating ${childRollup.total} child sub-session(s)${waitingSuffix}`.slice(0, 80);
@@ -185,6 +251,7 @@ export function sessionToAgent(
   parentAgentName?: string,
   rootAgentName?: string,
   childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
 ): Agent {
   const { messages, status } = session;
   const state = phaseToState(status.phase, messages);
@@ -197,14 +264,14 @@ export function sessionToAgent(
     id: session.sessionKey,
     name: agentName,
     state,
-    currentTask: buildCurrentTask(typeof lastMsg?.content === 'string' ? lastMsg.content : undefined, node, childRollup),
+    currentTask: buildCurrentTask(typeof lastMsg?.content === 'string' ? lastMsg.content : undefined, node, childRollup, conflictSummary),
     elapsedTime: firstMsg ? formatElapsed(firstMsg.timestamp) : '—',
     lastTool: lastToolMsg?.toolName || 'none',
-    confidence: state === 'error' ? 0.3 : state === 'complete' ? 0.99 : 0.8,
-    riskLevel: state === 'error' || state === 'stalled' || (childRollup?.failed ?? 0) > 0 || (childRollup?.stalled ?? 0) > 0 ? 'high' : 'low',
+    confidence: conflictSummary?.detected ? 0.55 : state === 'error' ? 0.3 : state === 'complete' ? 0.99 : 0.8,
+    riskLevel: state === 'error' || state === 'stalled' || (childRollup?.failed ?? 0) > 0 || (childRollup?.stalled ?? 0) > 0 || conflictSummary?.detected ? 'high' : 'low',
     objective: sessionObjective(messages, node, parentAgentName),
-    blockers: buildAgentBlockers(state, node, childRollup),
-    approvalNeeded: state === 'awaiting_approval' || (childRollup?.waiting ?? 0) > 0,
+    blockers: buildAgentBlockers(state, node, childRollup, conflictSummary),
+    approvalNeeded: state === 'awaiting_approval' || (childRollup?.waiting ?? 0) > 0 || Boolean(conflictSummary?.detected),
     actions: messages.slice(-10).map((message) => messageToAction(message, agentName)),
     agentKind: node.agent,
     displayRole: buildDisplayRole(node),
@@ -218,6 +285,7 @@ export function sessionToAgent(
       isSubSession: node.agent !== 'walter',
     },
     childRollup,
+    conflictSummary,
   };
 }
 
@@ -259,6 +327,7 @@ export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
       const parentAgentName = node.parentSessionKey ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node) : undefined;
       const rootAgentName = buildAgentName(nodeMap.get(node.rootSessionKey) ?? node);
       const childRollup = buildChildRollup(node, sessionMap);
+      const conflictSummary = buildConflictSummary(node, sessionMap);
       return sessionToAgent(
         session,
         node,
@@ -266,6 +335,7 @@ export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
         parentAgentName,
         rootAgentName,
         childRollup,
+        conflictSummary,
       );
     })
     .filter((agent): agent is Agent => agent !== null);

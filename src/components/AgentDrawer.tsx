@@ -73,6 +73,20 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           )}
 
+          {agent.conflictSummary?.detected && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Conflict Review</h3>
+              </div>
+              <div className="space-y-1.5 text-xs text-foreground/85">
+                <div>Summary: <span className="font-mono text-warning">{agent.conflictSummary.summary}</span></div>
+                <div>Severity: <span className="font-mono text-muted-foreground">{agent.conflictSummary.severity}</span></div>
+                <div>Conflicting sub-agents: <span className="font-mono text-muted-foreground">{agent.conflictSummary.conflictingAgentKinds.join(', ')}</span></div>
+              </div>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Target className="w-3.5 h-3.5 text-primary" />
@@ -116,7 +130,7 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
           {agent.approvalNeeded && (
             <div className="bg-warning/5 border border-warning/20 rounded-lg p-3">
               <p className="text-xs font-medium text-warning">⚠ Approval Required</p>
-              <p className="text-xs text-muted-foreground mt-1">This agent is paused pending your approval.</p>
+              <p className="text-xs text-muted-foreground mt-1">This agent is paused pending your approval or review.</p>
             </div>
           )}
 
