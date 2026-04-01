@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig } from '@/lib/openclaw/config';
+import { useOpenClawConfig } from '@/lib/openclaw/config';
 import { fetchAllSessions, subscribeSessionSSE } from '@/lib/openclaw/client';
 import { OpenClawWebSocket } from '@/lib/openclaw/websocket';
 import { sessionsToAgents, sessionsToActivity } from '@/lib/openclaw/adapter';
@@ -19,26 +19,31 @@ interface UseOpenClawDataReturn {
   usingMockData: boolean;
 }
 
-/**
- * Hook that returns sessions, agents, and activity from OpenClaw when connected,
- * or mock data when the connection is explicitly disabled.
- *
- * Data flow priority:
- *   1. WebSocket events (session.message / sessions.changed) — instant
- *   2. SSE via follow=1 — near-real-time fallback
- *   3. Polling GET /sessions/{key}/history — 10s interval
- *   4. Mock data — only when OpenClaw is disabled
- */
 export function useOpenClawData(): UseOpenClawDataReturn {
-  const config = getConfig();
+  const config = useOpenClawConfig();
   const queryClient = useQueryClient();
   const [liveMessages, setLiveMessages] = useState<Map<string, OpenClawMessage[]>>(new Map());
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<OpenClawWebSocket | null>(null);
   const sseControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const sessionKeySignature = JSON.stringify(config.sessionKeys);
+
+  useEffect(() => {
+    setLiveMessages(new Map());
+    setWsConnected(false);
+  }, [config.enabled, config.baseUrl, config.wsUrl, config.authMode, config.authToken, config.authHeaderName, config.authHeaderPrefix, sessionKeySignature]);
 
   const { data: polledSessions, isLoading, error } = useQuery<OpenClawSession[]>({
-    queryKey: ['openclaw-sessions', config.sessionKeys],
+    queryKey: [
+      'openclaw-sessions',
+      config.baseUrl,
+      config.enabled,
+      config.authMode,
+      config.authToken,
+      config.authHeaderName,
+      config.authHeaderPrefix,
+      sessionKeySignature,
+    ],
     queryFn: () => fetchAllSessions(config.sessionKeys, { includeTools: true }),
     refetchInterval: config.enabled ? 10_000 : false,
     enabled: config.enabled,
@@ -73,7 +78,7 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       wsRef.current = null;
       setWsConnected(false);
     };
-  }, [config.enabled, config.wsUrl, JSON.stringify(config.sessionKeys), queryClient]);
+  }, [config.enabled, config.wsUrl, sessionKeySignature, queryClient]);
 
   useEffect(() => {
     if (!config.enabled) return;
@@ -100,7 +105,7 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       controllers.forEach((ctrl) => ctrl.abort());
       controllers.clear();
     };
-  }, [config.enabled, config.baseUrl, JSON.stringify(config.sessionKeys)]);
+  }, [config.enabled, config.baseUrl, sessionKeySignature]);
 
   const mergedSessions = useMemo<OpenClawSession[]>(() => {
     if (!polledSessions?.length) return [];
