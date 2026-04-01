@@ -27,21 +27,29 @@ const defaultConfig: OpenClawConfig = {
   authHeaderPrefix: 'Bearer ',
 };
 
+let cachedConfig: OpenClawConfig = defaultConfig;
+let cachedRaw: string | null = null;
+
 function readConfig(): OpenClawConfig {
   if (typeof window === 'undefined') return defaultConfig;
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...defaultConfig, ...JSON.parse(raw) };
+    if (raw !== cachedRaw) {
+      cachedRaw = raw;
+      cachedConfig = raw ? { ...defaultConfig, ...JSON.parse(raw) } : defaultConfig;
+    }
   } catch {
     // ignore
   }
 
-  return defaultConfig;
+  return cachedConfig;
 }
 
 function emitConfigChanged() {
   if (typeof window === 'undefined') return;
+  // Invalidate cache before emitting so subscribers get the new value
+  cachedRaw = null;
   window.dispatchEvent(new CustomEvent(CONFIG_EVENT));
 }
 
