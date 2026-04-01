@@ -32,6 +32,12 @@ export class OpenClawWebSocket {
   connect(): void {
     if (this.disposed) return;
     const { wsUrl } = getConfig();
+
+    if (!wsUrl || !(wsUrl.startsWith('ws://') || wsUrl.startsWith('wss://'))) {
+      console.warn('[OpenClaw WS] skipped invalid wsUrl:', wsUrl);
+      return;
+    }
+
     try {
       this.ws = new WebSocket(wsUrl);
     } catch (e) {

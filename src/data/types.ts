@@ -35,6 +35,15 @@ export interface ConflictSummary {
   conflictingAgentKinds: string[];
 }
 
+export interface StaleSessionSummary {
+  detected: boolean;
+  severity: 'medium' | 'high';
+  summary: string;
+  staleSessionCount: number;
+  oldestStaleMinutes: number;
+  staleAgentKinds: string[];
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -55,6 +64,7 @@ export interface Agent {
   hierarchy?: AgentHierarchy;
   childRollup?: ChildSessionRollup;
   conflictSummary?: ConflictSummary;
+  staleSessionSummary?: StaleSessionSummary;
 }
 
 export interface AgentAction {
