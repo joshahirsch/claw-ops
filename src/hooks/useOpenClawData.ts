@@ -139,8 +139,18 @@ export function useOpenClawData(): UseOpenClawDataReturn {
     };
   }
 
-  const agents = sessionsToAgents(mergedSessions);
-  const activity = sessionsToActivity(mergedSessions);
+  let derivedError: string | null = error ? (error instanceof Error ? error.message : 'Connection error') : null;
+  let agents: Agent[] = [];
+  let activity: ActivityEvent[] = [];
+
+  try {
+    agents = sessionsToAgents(mergedSessions);
+    activity = sessionsToActivity(mergedSessions);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : 'Unknown adapter error';
+    console.error('[OpenClaw adapter]', e);
+    derivedError = derivedError ? `${derivedError} | Adapter error: ${message}` : `Adapter error: ${message}`;
+  }
 
   return {
     sessions: mergedSessions,
@@ -148,7 +158,7 @@ export function useOpenClawData(): UseOpenClawDataReturn {
     activity,
     isLive: wsConnected || mergedSessions.length > 0,
     isLoading,
-    error: error ? (error instanceof Error ? error.message : 'Connection error') : null,
+    error: derivedError,
     wsConnected,
     usingMockData: false,
   };

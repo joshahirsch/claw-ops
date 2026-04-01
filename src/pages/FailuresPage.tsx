@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { mockFailures } from '@/data/mockData';
 import { useOpenClawData } from '@/hooks/useOpenClawData';
 import { sessionsToFailures } from '@/lib/openclaw/adapter';
@@ -20,7 +21,22 @@ const statusChip: Record<string, string> = {
 
 const FailuresPage = () => {
   const { sessions, isLoading, error, usingMockData } = useOpenClawData();
-  const failures = usingMockData ? mockFailures : sessionsToFailures(sessions);
+
+  const { failures, adapterError } = useMemo(() => {
+    if (usingMockData) {
+      return { failures: mockFailures, adapterError: null as string | null };
+    }
+
+    try {
+      return { failures: sessionsToFailures(sessions), adapterError: null as string | null };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown adapter error';
+      console.error('[FailuresPage]', e);
+      return { failures: [], adapterError: `Adapter error: ${message}` };
+    }
+  }, [sessions, usingMockData]);
+
+  const displayError = error && adapterError ? `${error} | ${adapterError}` : error || adapterError;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -31,9 +47,9 @@ const FailuresPage = () => {
         </p>
       </div>
 
-      {error && (
+      {displayError && (
         <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
-          Connection error: {error}
+          Connection error: {displayError}
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { mockReplaySessions } from '@/data/mockData';
 import { useOpenClawData } from '@/hooks/useOpenClawData';
 import { sessionsToReplaySessions } from '@/lib/openclaw/adapter';
@@ -15,9 +15,24 @@ const stepIcons: Record<string, typeof Bot> = {
 
 const ReplayPage = () => {
   const { sessions, isLoading, error, usingMockData } = useOpenClawData();
-  const replaySessions = usingMockData ? mockReplaySessions : sessionsToReplaySessions(sessions);
+
+  const { replaySessions, adapterError } = useMemo(() => {
+    if (usingMockData) {
+      return { replaySessions: mockReplaySessions, adapterError: null as string | null };
+    }
+
+    try {
+      return { replaySessions: sessionsToReplaySessions(sessions), adapterError: null as string | null };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown adapter error';
+      console.error('[ReplayPage]', e);
+      return { replaySessions: [], adapterError: `Adapter error: ${message}` };
+    }
+  }, [sessions, usingMockData]);
+
   const [selected, setSelected] = useState<ReplaySession | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
+  const displayError = error && adapterError ? `${error} | ${adapterError}` : error || adapterError;
 
   const handleSelect = (session: ReplaySession) => {
     setSelected(session);
@@ -33,9 +48,9 @@ const ReplayPage = () => {
         </p>
       </div>
 
-      {error && (
+      {displayError && (
         <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
-          Connection error: {error}
+          Connection error: {displayError}
         </div>
       )}
 
