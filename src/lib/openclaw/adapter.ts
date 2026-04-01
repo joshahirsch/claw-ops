@@ -3,49 +3,28 @@
  *
  * Data sources (in priority order):
  *   1. GET /sessions/{key}/history  — gateway API
- *   2. SSE follow=1 / WebSocket     — live incremental updates
+ *   2. SSE follow=1 / WebSocket    — live incremental updates
  *   3. JSONL transcript files       — offline fallback
  *
  * All paths normalise into the same OpenClawSession shape before
- * this adapter converts to Agent / ActivityEvent / ReplaySession.
+ * this adapter converts to Agent / ActivityEvent.
  */
 import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
-import type {
-  Agent,
-  AgentState,
-  AgentAction,
-  ActivityEvent,
-  ChildSessionRollup,
-  Severity,
-  ReplaySession,
-  ReplayStep,
-  Approval,
-  Failure,
-} from '@/data/types';
-import {
-  buildWalterSessionTree,
-  sessionsToWalterNodes,
-  type WalterSessionNode,
-  type WalterSessionTreeNode,
-} from './subagents';
+import type { Agent, AgentState, AgentAction, ActivityEvent, ChildSessionRollup, ConflictSummary, StaleSessionSummary, Severity } from '@/data/types';
+import { buildWalterSessionTree, sessionsToWalterNodes, type WalterSessionNode, type WalterSessionTreeNode } from './subagents';
 
-function formatClock(iso: string): string {
-  const time = new Date(iso);
-  return time.toLocaleTimeString('en-US', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
+const STALE_RUNNING_THRESHOLD_MINUTES = 10;
+const STALE_WAITING_THRESHOLD_MINUTES = 15;
 
-function formatClockTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('en-US', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
+function phaseToState(phase: string, messages: OpenClawMessage[]): AgentState {
+  const lastMsg = messages[messages.length - 1];
+  if (phase === 'waiting') return 'awaiting_approval';
+  if (phase === 'idle') {
+    return messages.length > 0 ? 'complete' : 'idle';
+  }
+  if (lastMsg?.role === 'toolResult') return 'tool_active';
+  if (lastMsg?.role === 'assistant') return 'thinking';
+  return 'multi_step';
 }
 
 function formatElapsed(startIso: string): string {
@@ -57,75 +36,13 @@ function formatElapsed(startIso: string): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function safeString(value: string | Record<string, unknown> | undefined, fallback: string): string {
-  if (typeof value === 'string' && value.trim()) return value;
-  if (value && typeof value === 'object') return JSON.stringify(value).slice(0, 200);
-  return fallback;
-}
-
-function normaliseText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
-function hasErrorSignal(msg: OpenClawMessage): boolean {
-  const text = normaliseText(
-    [
-      typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-      msg.toolOutput || '',
-      msg.toolName || '',
-    ].join(' ')
-  ).toLowerCase();
-
-  return /(error|failed|failure|exception|timeout|forbidden|unauthorized|503|stalled|blocked)/.test(text);
-}
-
-function sessionHasErrorSignal(session: OpenClawSession): boolean {
-  return session.messages.some(hasErrorSignal);
-}
-
-function sessionDisplayName(session: OpenClawSession): string {
-  return `Session-${session.sessionKey.slice(0, 6)}`;
-}
-
-function firstUserObjective(session: OpenClawSession): string {
-  const firstUser = session.messages.find((msg) => msg.role === 'user');
-  return safeString(firstUser?.content, 'Unknown objective').slice(0, 120);
-}
-
-function currentTaskFromSession(session: OpenClawSession): string {
-  const lastAssistant = [...session.messages].reverse().find((msg) => msg.role === 'assistant');
-  const firstUser = session.messages.find((msg) => msg.role === 'user');
-  return safeString(lastAssistant?.content, safeString(firstUser?.content, 'Awaiting activity')).slice(0, 80);
-}
-
-function phaseToState(session: OpenClawSession): AgentState {
-  const { status, messages, updatedAt } = session;
-  const lastMsg = messages[messages.length - 1];
-  const idleMs = Date.now() - new Date(updatedAt).getTime();
-
-  if (status.phase === 'waiting') return 'awaiting_approval';
-  if (sessionHasErrorSignal(session)) return 'error';
-  if (status.phase === 'idle') {
-    return messages.length > 0 ? 'complete' : 'idle';
-  }
-  if (idleMs > 5 * 60 * 1000) return 'stalled';
-  if (lastMsg?.role === 'toolResult') return 'tool_active';
-  if (lastMsg?.role === 'assistant') return 'thinking';
-  return 'multi_step';
-}
-
-function inferRiskLevel(state: AgentState): Severity {
-  if (state === 'error' || state === 'stalled') return 'high';
-  if (state === 'awaiting_approval') return 'medium';
-  return 'low';
-}
-
-function inferConfidence(state: AgentState): number {
-  if (state === 'error') return 0.2;
-  if (state === 'stalled') return 0.4;
-  if (state === 'awaiting_approval') return 0.65;
-  if (state === 'complete') return 0.99;
-  return 0.8;
+function formatClockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function buildAgentName(node: WalterSessionNode): string {
@@ -141,30 +58,15 @@ function messageToAction(msg: OpenClawMessage, actorLabel: string): AgentAction 
   return {
     id: msg.id,
     timestamp: formatClockTime(msg.timestamp),
-    type:
-      msg.role === 'toolResult'
-        ? hasErrorSignal(msg)
-          ? 'error'
-          : 'tool_use'
-        : msg.role === 'assistant'
-          ? 'reasoning'
-          : 'incoming',
-    description: safeString(msg.content, 'No content').slice(0, 200),
+    type: msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'reasoning' : 'incoming',
+    description: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
     tool: msg.toolName,
     actorLabel,
   };
 }
 
-function walterSessionObjective(
-  messages: OpenClawMessage[],
-  node: WalterSessionNode,
-  parentAgentName?: string,
-): string {
-  const firstContent =
-    typeof messages[0]?.content === 'string'
-      ? messages[0].content.slice(0, 120)
-      : 'Unknown objective';
-
+function sessionObjective(messages: OpenClawMessage[], node: WalterSessionNode, parentAgentName?: string): string {
+  const firstContent = typeof messages[0]?.content === 'string' ? messages[0].content.slice(0, 120) : 'Unknown objective';
   if (node.agent === 'walter') return firstContent;
   return parentAgentName ? `${firstContent} · delegated by ${parentAgentName}` : firstContent;
 }
@@ -229,7 +131,7 @@ function buildChildRollup(
   descendants.forEach((child) => {
     const session = sessionMap.get(child.sessionKey);
     if (!session) return;
-    const state = phaseToState(session);
+    const state = phaseToState(session.status.phase, session.messages);
     if (isActiveState(state)) counts.active += 1;
     if (state === 'awaiting_approval') counts.waiting += 1;
     if (state === 'error') counts.failed += 1;
@@ -250,65 +152,131 @@ function buildChildRollup(
   };
 }
 
-function latestErrorMessage(session: OpenClawSession): OpenClawMessage | undefined {
-  return [...session.messages].reverse().find(hasErrorSignal);
+function normalizeConflictText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/walter:[a-z_]+/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
 }
 
-function approvalReason(session: OpenClawSession): string {
-  const latestAssistant = [...session.messages].reverse().find((msg) => msg.role === 'assistant');
-  const latestTool = [...session.messages].reverse().find((msg) => msg.role === 'toolResult');
-  return safeString(
-    latestAssistant?.content,
-    safeString(latestTool?.content, 'Session paused pending human approval.'),
-  ).slice(0, 200);
+function buildConflictSummary(
+  node: WalterSessionTreeNode,
+  sessionMap: Map<string, OpenClawSession>,
+): ConflictSummary | undefined {
+  if (node.agent !== 'walter') return undefined;
+
+  const descendants = collectDescendants(node);
+  if (descendants.length < 2) return undefined;
+
+  const byAgentKind = new Map<string, string[]>();
+
+  descendants.forEach((child) => {
+    const session = sessionMap.get(child.sessionKey);
+    if (!session) return;
+    const state = phaseToState(session.status.phase, session.messages);
+    if (state !== 'complete') return;
+
+    const lastMessage = session.messages[session.messages.length - 1];
+    const currentTask = typeof lastMessage?.content === 'string'
+      ? lastMessage.content
+      : JSON.stringify(lastMessage?.content ?? '');
+    const normalized = normalizeConflictText(currentTask);
+    if (!normalized) return;
+
+    const kind = child.agent;
+    const existing = byAgentKind.get(kind) ?? [];
+    if (!existing.includes(normalized)) existing.push(normalized);
+    byAgentKind.set(kind, existing);
+  });
+
+  const conflictingAgentKinds = Array.from(byAgentKind.entries())
+    .filter(([, values]) => values.length > 1)
+    .map(([kind]) => kind);
+
+  if (conflictingAgentKinds.length === 0) return undefined;
+
+  const severity = conflictingAgentKinds.length > 1 ? 'high' : 'medium';
+  const summary = `Possible conflicting child results detected across ${conflictingAgentKinds.join(', ').replace(/_/g, ' ')}.`;
+
+  return {
+    detected: true,
+    severity,
+    summary,
+    conflictingAgentKinds,
+  };
 }
 
-function failureCause(session: OpenClawSession): string {
-  const err = latestErrorMessage(session);
-  if (err) {
-    return safeString(
-      err.content,
-      err.toolOutput || 'Recent session activity indicates an error.',
-    ).slice(0, 200);
-  }
-  if (phaseToState(session) === 'stalled') {
-    return 'No recent session activity detected while the session remains active.';
-  }
-  return 'Session entered a failure state.';
+function minutesSince(iso: string): number {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  return Math.max(0, Math.floor(diffMs / 60000));
 }
 
-function failureRecommendedAction(state: AgentState): string {
-  if (state === 'stalled') {
-    return 'Inspect the session timeline, confirm upstream connectivity, and retry the blocked step.';
-  }
-  if (state === 'error') {
-    return 'Inspect the last tool result or assistant message, verify upstream dependencies, and rerun after correction.';
-  }
-  return 'Review the session trace before retrying.';
+function buildStaleSessionSummary(
+  node: WalterSessionTreeNode,
+  sessionMap: Map<string, OpenClawSession>,
+): StaleSessionSummary | undefined {
+  if (node.agent !== 'walter') return undefined;
+
+  const descendants = collectDescendants(node);
+  if (descendants.length === 0) return undefined;
+
+  const staleKinds = new Set<string>();
+  let staleCount = 0;
+  let oldestStaleMinutes = 0;
+
+  descendants.forEach((child) => {
+    const session = sessionMap.get(child.sessionKey);
+    if (!session) return;
+    const state = phaseToState(session.status.phase, session.messages);
+    const ageMinutes = minutesSince(session.updatedAt);
+    const isStaleRunning = isActiveState(state) && ageMinutes >= STALE_RUNNING_THRESHOLD_MINUTES;
+    const isStaleWaiting = state === 'awaiting_approval' && ageMinutes >= STALE_WAITING_THRESHOLD_MINUTES;
+
+    if (!isStaleRunning && !isStaleWaiting) return;
+
+    staleCount += 1;
+    oldestStaleMinutes = Math.max(oldestStaleMinutes, ageMinutes);
+    staleKinds.add(child.agent);
+  });
+
+  if (staleCount === 0) return undefined;
+
+  const severity = staleCount >= 2 || oldestStaleMinutes >= 30 ? 'high' : 'medium';
+  const summary = `${staleCount} child sub-session(s) stale. Oldest stale child: ${oldestStaleMinutes}m.`;
+
+  return {
+    detected: true,
+    severity,
+    summary,
+    staleSessionCount: staleCount,
+    oldestStaleMinutes,
+    staleAgentKinds: Array.from(staleKinds),
+  };
 }
 
 function buildAgentBlockers(
   state: AgentState,
   node: WalterSessionNode,
   childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+  staleSessionSummary?: StaleSessionSummary,
 ): string[] {
   const blockers: string[] = [];
   if (state === 'awaiting_approval') blockers.push('Awaiting human approval');
   if (state === 'stalled') blockers.push('Sub-session stalled and may require Walter review.');
-  if (state === 'error') blockers.push('Recent message/tool output contains an error signal');
 
   if (node.agent === 'walter' && childRollup) {
     blockers.push(`${childRollup.total} child sub-session(s) linked to this root session.`);
-    if (childRollup.waiting > 0) {
-      blockers.push(`${childRollup.waiting} child sub-session(s) waiting on review or approval.`);
-    }
-    if (childRollup.failed > 0) {
-      blockers.push(`${childRollup.failed} child sub-session(s) failed and may require intervention.`);
-    }
-    if (childRollup.stalled > 0) {
-      blockers.push(`${childRollup.stalled} child sub-session(s) are stalled.`);
-    }
+    if (childRollup.waiting > 0) blockers.push(`${childRollup.waiting} child sub-session(s) waiting on review or approval.`);
+    if (childRollup.failed > 0) blockers.push(`${childRollup.failed} child sub-session(s) failed and may require intervention.`);
+    if (childRollup.stalled > 0) blockers.push(`${childRollup.stalled} child sub-session(s) are stalled.`);
   }
+
+  if (conflictSummary?.detected) blockers.push(conflictSummary.summary);
+  if (staleSessionSummary?.detected) blockers.push(staleSessionSummary.summary);
 
   return blockers;
 }
@@ -317,12 +285,103 @@ function buildCurrentTask(
   lastMessageText: string | undefined,
   node: WalterSessionNode,
   childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+  staleSessionSummary?: StaleSessionSummary,
 ): string {
   const fallback = lastMessageText || 'Processing…';
   if (node.agent !== 'walter' || !childRollup) return fallback.slice(0, 80);
+  if (conflictSummary?.detected) return 'Reviewing conflicting child sub-session results'.slice(0, 80);
+  if (staleSessionSummary?.detected) return 'Investigating stale child sub-session execution'.slice(0, 80);
 
   const waitingSuffix = childRollup.waiting > 0 ? ` · waiting on ${childRollup.waiting} child` : '';
   return `Coordinating ${childRollup.total} child sub-session(s)${waitingSuffix}`.slice(0, 80);
+}
+
+function rootSupervisionEvent(
+  id: string,
+  timestampIso: string,
+  type: string,
+  severity: Severity,
+  message: string,
+): ActivityEvent & { sortTimestamp: string } {
+  return {
+    id,
+    timestamp: formatClockTime(timestampIso),
+    agentName: 'Walter',
+    agentId: 'walter-root',
+    type,
+    message,
+    severity,
+    agentKind: 'walter',
+    rootAgentName: 'Walter',
+    isSubSession: false,
+    sortTimestamp: timestampIso,
+  };
+}
+
+function buildRootSupervisionEvents(
+  node: WalterSessionTreeNode,
+  session: OpenClawSession,
+  childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+  staleSessionSummary?: StaleSessionSummary,
+): Array<ActivityEvent & { sortTimestamp: string }> {
+  if (node.agent !== 'walter' || !childRollup) return [];
+
+  const events: Array<ActivityEvent & { sortTimestamp: string }> = [];
+  const ts = session.updatedAt;
+
+  if (conflictSummary?.detected) {
+    events.push(rootSupervisionEvent(
+      `${session.sessionKey}:supervision:conflict`,
+      ts,
+      'error',
+      'high',
+      conflictSummary.summary,
+    ));
+  }
+
+  if (staleSessionSummary?.detected) {
+    events.push(rootSupervisionEvent(
+      `${session.sessionKey}:supervision:stale`,
+      ts,
+      'stalled',
+      staleSessionSummary.severity === 'high' ? 'high' : 'medium',
+      staleSessionSummary.summary,
+    ));
+  }
+
+  if (childRollup.failed > 0) {
+    events.push(rootSupervisionEvent(
+      `${session.sessionKey}:supervision:failed`,
+      ts,
+      'error',
+      'high',
+      `Walter supervision: ${childRollup.failed} child sub-session(s) failed.`,
+    ));
+  }
+
+  if (childRollup.waiting > 0) {
+    events.push(rootSupervisionEvent(
+      `${session.sessionKey}:supervision:waiting`,
+      ts,
+      'approval_request',
+      'medium',
+      `Walter supervision: waiting on ${childRollup.waiting} child sub-session(s).`,
+    ));
+  }
+
+  if (!conflictSummary?.detected && !staleSessionSummary?.detected && childRollup.total > 0 && childRollup.completed === childRollup.total) {
+    events.push(rootSupervisionEvent(
+      `${session.sessionKey}:supervision:completed`,
+      ts,
+      'completed',
+      'low',
+      `Walter supervision: all ${childRollup.total} child sub-session(s) completed.`,
+    ));
+  }
+
+  return events;
 }
 
 export function sessionToAgent(
@@ -332,33 +391,29 @@ export function sessionToAgent(
   parentAgentName?: string,
   rootAgentName?: string,
   childRollup?: ChildSessionRollup,
+  conflictSummary?: ConflictSummary,
+  staleSessionSummary?: StaleSessionSummary,
 ): Agent {
-  const { messages } = session;
-  const state = phaseToState(session);
+  const { messages, status } = session;
+  const state = phaseToState(status.phase, messages);
   const lastToolMsg = [...messages].reverse().find((m) => m.role === 'toolResult');
   const firstMsg = messages[0];
   const lastMsg = messages[messages.length - 1];
   const agentName = buildAgentName(node);
+  const degraded = Boolean(conflictSummary?.detected || staleSessionSummary?.detected);
 
   return {
     id: session.sessionKey,
     name: agentName,
     state,
-    currentTask: buildCurrentTask(
-      typeof lastMsg?.content === 'string' ? lastMsg.content : undefined,
-      node,
-      childRollup,
-    ),
+    currentTask: buildCurrentTask(typeof lastMsg?.content === 'string' ? lastMsg.content : undefined, node, childRollup, conflictSummary, staleSessionSummary),
     elapsedTime: firstMsg ? formatElapsed(firstMsg.timestamp) : '—',
     lastTool: lastToolMsg?.toolName || 'none',
-    confidence: inferConfidence(state),
-    riskLevel:
-      state === 'error' || state === 'stalled' || (childRollup?.failed ?? 0) > 0 || (childRollup?.stalled ?? 0) > 0
-        ? 'high'
-        : inferRiskLevel(state),
-    objective: walterSessionObjective(messages, node, parentAgentName),
-    blockers: buildAgentBlockers(state, node, childRollup),
-    approvalNeeded: state === 'awaiting_approval' || (childRollup?.waiting ?? 0) > 0,
+    confidence: conflictSummary?.detected ? 0.55 : staleSessionSummary?.detected ? 0.6 : state === 'error' ? 0.3 : state === 'complete' ? 0.99 : 0.8,
+    riskLevel: state === 'error' || state === 'stalled' || (childRollup?.failed ?? 0) > 0 || (childRollup?.stalled ?? 0) > 0 || degraded ? 'high' : 'low',
+    objective: sessionObjective(messages, node, parentAgentName),
+    blockers: buildAgentBlockers(state, node, childRollup, conflictSummary, staleSessionSummary),
+    approvalNeeded: state === 'awaiting_approval' || (childRollup?.waiting ?? 0) > 0 || degraded,
     actions: messages.slice(-10).map((message) => messageToAction(message, agentName)),
     agentKind: node.agent,
     displayRole: buildDisplayRole(node),
@@ -372,18 +427,9 @@ export function sessionToAgent(
       isSubSession: node.agent !== 'walter',
     },
     childRollup,
+    conflictSummary,
+    staleSessionSummary,
   };
-}
-
-function messageSeverity(msg: OpenClawMessage): Severity {
-  if (hasErrorSignal(msg)) return 'high';
-  return 'low';
-}
-
-function messageType(msg: OpenClawMessage): string {
-  if (msg.role === 'toolResult') return hasErrorSignal(msg) ? 'error' : 'tool_use';
-  if (msg.role === 'assistant') return 'reasoning';
-  return 'incoming';
 }
 
 export function messageToActivityEvent(
@@ -393,7 +439,7 @@ export function messageToActivityEvent(
   parentAgentName?: string,
   rootAgentName?: string,
 ): ActivityEvent & { sortTimestamp: string } {
-  const severity: Severity = messageSeverity(msg);
+  const severity: Severity = msg.role === 'toolResult' && msg.toolOutput?.includes('error') ? 'high' : 'low';
   const agentName = buildAgentName(node);
 
   return {
@@ -401,8 +447,8 @@ export function messageToActivityEvent(
     timestamp: formatClockTime(msg.timestamp),
     agentName,
     agentId: session.sessionKey,
-    type: messageType(msg),
-    message: safeString(msg.content, 'No content').slice(0, 200),
+    type: msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'reasoning' : 'incoming',
+    message: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
     severity,
     tool: msg.toolName,
     agentKind: node.agent,
@@ -413,110 +459,19 @@ export function messageToActivityEvent(
   };
 }
 
-function messageToReplayStep(msg: OpenClawMessage): ReplayStep {
-  return {
-    id: msg.id,
-    timestamp: formatClock(msg.timestamp),
-    type: msg.role === 'toolResult' ? (hasErrorSignal(msg) ? 'error' : 'tool_use') : 'thinking',
-    description: safeString(
-      msg.content,
-      msg.toolName ? `Tool used: ${msg.toolName}` : 'No content',
-    ).slice(0, 200),
-    tool: msg.toolName,
-    duration: '—',
-  };
-}
-
-export function sessionToReplaySession(session: OpenClawSession): ReplaySession {
-  const state = phaseToState(session);
-  const messages = session.messages;
-  const steps: ReplayStep[] = messages.map(messageToReplayStep);
-
-  if (session.status.phase === 'waiting') {
-    steps.push({
-      id: `${session.sessionKey}-approval`,
-      timestamp: formatClock(session.updatedAt),
-      type: 'approval',
-      description: 'Session is awaiting approval before continuing.',
-      duration: '—',
-    });
-  } else if (state === 'complete' && messages.length > 0) {
-    steps.push({
-      id: `${session.sessionKey}-complete`,
-      timestamp: formatClock(session.updatedAt),
-      type: 'complete',
-      description: 'Session completed successfully.',
-      duration: '0s',
-    });
-  } else if (state === 'error') {
-    steps.push({
-      id: `${session.sessionKey}-error`,
-      timestamp: formatClock(session.updatedAt),
-      type: 'error',
-      description: 'Session ended with an error signal in recent activity.',
-      duration: '0s',
-    });
-  }
-
-  const startTime = messages[0]?.timestamp || session.updatedAt;
-
-  return {
-    id: session.sessionKey,
-    agentName: sessionDisplayName(session),
-    task: firstUserObjective(session),
-    startTime: formatClock(startTime),
-    endTime: formatClock(session.updatedAt),
-    status: state === 'error' ? 'failed' : 'completed',
-    steps,
-  };
-}
-
-export function sessionToApproval(session: OpenClawSession): Approval | null {
-  if (session.status.phase !== 'waiting') return null;
-
-  return {
-    id: `approval-${session.sessionKey}`,
-    agentName: sessionDisplayName(session),
-    agentId: session.sessionKey,
-    action: currentTaskFromSession(session),
-    reason: approvalReason(session),
-    timestamp: formatClock(session.updatedAt),
-    status: 'pending',
-    notes: 'Read-only view in pass 2A. Action wiring comes later.',
-  };
-}
-
-export function sessionToFailure(session: OpenClawSession): Failure | null {
-  const state = phaseToState(session);
-  if (!['error', 'stalled'].includes(state)) return null;
-
-  return {
-    id: `failure-${session.sessionKey}`,
-    agentName: sessionDisplayName(session),
-    agentId: session.sessionKey,
-    severity: state === 'error' ? 'high' : 'medium',
-    cause: failureCause(session),
-    recommendedAction: failureRecommendedAction(state),
-    status: state === 'error' ? 'failed' : 'blocked',
-    timestamp: formatClock(session.updatedAt),
-    task: currentTaskFromSession(session),
-  };
-}
-
 export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
   const { ordered, nodeMap } = buildNodeMaps(sessions);
-  const sessionMap = new Map(sessions.map((session) => [session.sessionKey, session] as const));
+  const sessionMap = new Map(sessions.map((session) => [session.sessionKey, session]));
 
   return ordered
     .map((node) => {
       const session = sessionMap.get(node.sessionKey);
       if (!session) return null;
-      const parentAgentName = node.parentSessionKey
-        ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node)
-        : undefined;
+      const parentAgentName = node.parentSessionKey ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node) : undefined;
       const rootAgentName = buildAgentName(nodeMap.get(node.rootSessionKey) ?? node);
       const childRollup = buildChildRollup(node, sessionMap);
-
+      const conflictSummary = buildConflictSummary(node, sessionMap);
+      const staleSessionSummary = buildStaleSessionSummary(node, sessionMap);
       return sessionToAgent(
         session,
         node,
@@ -524,6 +479,8 @@ export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
         parentAgentName,
         rootAgentName,
         childRollup,
+        conflictSummary,
+        staleSessionSummary,
       );
     })
     .filter((agent): agent is Agent => agent !== null);
@@ -531,51 +488,27 @@ export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
 
 export function sessionsToActivity(sessions: OpenClawSession[], maxItems = 20): ActivityEvent[] {
   const { nodeMap } = buildNodeMaps(sessions);
+  const sessionMap = new Map(sessions.map((session) => [session.sessionKey, session]));
 
   return sessions
     .flatMap((session) => {
       const node = nodeMap.get(session.sessionKey);
       if (!node) return [];
-      const parentAgentName = node.parentSessionKey
-        ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node)
-        : undefined;
+      const parentAgentName = node.parentSessionKey ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node) : undefined;
       const rootAgentName = buildAgentName(nodeMap.get(node.rootSessionKey) ?? node);
+      const childRollup = buildChildRollup(node, sessionMap);
+      const conflictSummary = buildConflictSummary(node, sessionMap);
+      const staleSessionSummary = buildStaleSessionSummary(node, sessionMap);
 
-      return session.messages.map((message) =>
-        messageToActivityEvent(message, session, node, parentAgentName, rootAgentName),
-      );
+      const messageEvents = session.messages.map((message) => messageToActivityEvent(message, session, node, parentAgentName, rootAgentName));
+      const supervisionEvents = buildRootSupervisionEvents(node, session, childRollup, conflictSummary, staleSessionSummary);
+      return [...messageEvents, ...supervisionEvents];
     })
     .sort((a, b) => b.sortTimestamp.localeCompare(a.sortTimestamp))
     .slice(0, maxItems)
     .map(({ sortTimestamp, ...event }) => event);
 }
 
-export function sessionsToReplaySessions(sessions: OpenClawSession[], maxItems = 12): ReplaySession[] {
-  return sessions
-    .filter((session) => session.messages.length > 0)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, maxItems)
-    .map((session) => sessionToReplaySession(session));
-}
-
-export function sessionsToApprovals(sessions: OpenClawSession[]): Approval[] {
-  return sessions
-    .map((session) => sessionToApproval(session))
-    .filter((approval): approval is Approval => approval !== null)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-}
-
-export function sessionsToFailures(sessions: OpenClawSession[]): Failure[] {
-  return sessions
-    .map((session) => sessionToFailure(session))
-    .filter((failure): failure is Failure => failure !== null)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-}
-
-/**
- * Normalise raw JSONL transcript entries (from disk files) into
- * the standard OpenClawMessage shape so the same adapter works.
- */
 export function normaliseTranscriptEntry(entry: RawTranscriptEntry): OpenClawMessage | null {
   const type = entry.type;
   if (type === 'session_header' || type === 'compaction' || type === 'branch_summary') {
@@ -605,7 +538,7 @@ function normaliseRole(entry: RawTranscriptEntry): OpenClawMessage['role'] {
 
 export function jsonlToSession(
   sessionKey: string,
-  lines: RawTranscriptEntry[],
+  lines: RawTranscriptEntry[]
 ): OpenClawSession {
   const messages = lines
     .map(normaliseTranscriptEntry)
