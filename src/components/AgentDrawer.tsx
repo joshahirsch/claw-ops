@@ -1,6 +1,6 @@
 import { Agent } from '@/data/types';
 import StateIndicator from './StateIndicator';
-import { X, Clock, Target, Wrench, AlertTriangle, Play } from 'lucide-react';
+import { X, Clock, Target, Wrench, AlertTriangle, Play, GitBranch, Network, Layers3 } from 'lucide-react';
 
 interface AgentDrawerProps {
   agent: Agent | null;
@@ -20,7 +20,14 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
         <div className="sticky top-0 bg-card/95 backdrop-blur-xl border-b border-border p-4 flex items-center justify-between z-10">
           <div>
             <h2 className="text-base font-semibold text-foreground">{agent.name}</h2>
-            <StateIndicator state={agent.state} size="md" />
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              <StateIndicator state={agent.state} size="md" />
+              {agent.displayRole && (
+                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground bg-secondary px-2 py-0.5 rounded">
+                  {agent.displayRole}
+                </span>
+              )}
+            </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-md hover:bg-secondary transition-colors">
             <X className="w-4 h-4 text-muted-foreground" />
@@ -28,7 +35,58 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
         </div>
 
         <div className="p-4 space-y-5">
-          {/* Objective */}
+          {agent.hierarchy && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Network className="w-3.5 h-3.5 text-primary" />
+                <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Session Topology</h3>
+              </div>
+              <div className="space-y-1.5 text-xs text-foreground/85">
+                <div>Root session: <span className="font-mono text-muted-foreground">{agent.hierarchy.rootSessionKey}</span></div>
+                {agent.hierarchy.parentSessionKey && (
+                  <div className="flex items-center gap-1 text-accent/80">
+                    <GitBranch className="w-3 h-3" />
+                    Parent session: <span className="font-mono">{agent.hierarchy.parentSessionKey}</span>
+                  </div>
+                )}
+                {typeof agent.hierarchy.childSessionCount === 'number' && agent.hierarchy.childSessionCount > 0 && (
+                  <div>Child sub-sessions: <span className="font-mono text-muted-foreground">{agent.hierarchy.childSessionCount}</span></div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {agent.childRollup && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Layers3 className="w-3.5 h-3.5 text-primary" />
+                <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Child Rollup</h3>
+              </div>
+              <div className="space-y-1.5 text-xs text-foreground/85">
+                <div>Summary: <span className="font-mono text-muted-foreground">{agent.childRollup.summary}</span></div>
+                <div>Active: <span className="font-mono text-muted-foreground">{agent.childRollup.active}</span></div>
+                <div>Waiting: <span className="font-mono text-muted-foreground">{agent.childRollup.waiting}</span></div>
+                <div>Failed: <span className="font-mono text-muted-foreground">{agent.childRollup.failed}</span></div>
+                <div>Stalled: <span className="font-mono text-muted-foreground">{agent.childRollup.stalled}</span></div>
+                <div>Completed: <span className="font-mono text-muted-foreground">{agent.childRollup.completed}</span></div>
+              </div>
+            </div>
+          )}
+
+          {agent.conflictSummary?.detected && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+                <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Conflict Review</h3>
+              </div>
+              <div className="space-y-1.5 text-xs text-foreground/85">
+                <div>Summary: <span className="font-mono text-warning">{agent.conflictSummary.summary}</span></div>
+                <div>Severity: <span className="font-mono text-muted-foreground">{agent.conflictSummary.severity}</span></div>
+                <div>Conflicting sub-agents: <span className="font-mono text-muted-foreground">{agent.conflictSummary.conflictingAgentKinds.join(', ')}</span></div>
+              </div>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Target className="w-3.5 h-3.5 text-primary" />
@@ -37,7 +95,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             <p className="text-sm text-foreground/90">{agent.objective}</p>
           </div>
 
-          {/* Current Task */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Clock className="w-3.5 h-3.5 text-primary" />
@@ -47,7 +104,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             <p className="text-xs text-muted-foreground mt-1">Elapsed: {agent.elapsedTime}</p>
           </div>
 
-          {/* Last Tool */}
           <div className="flex items-center gap-4 text-sm">
             <div className="flex items-center gap-2">
               <Wrench className="w-3.5 h-3.5 text-accent" />
@@ -55,7 +111,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           </div>
 
-          {/* Blockers */}
           {agent.blockers.length > 0 && (
             <div>
               <div className="flex items-center gap-2 mb-2">
@@ -72,15 +127,13 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           )}
 
-          {/* Approval Status */}
           {agent.approvalNeeded && (
             <div className="bg-warning/5 border border-warning/20 rounded-lg p-3">
               <p className="text-xs font-medium text-warning">⚠ Approval Required</p>
-              <p className="text-xs text-muted-foreground mt-1">This agent is paused pending your approval.</p>
+              <p className="text-xs text-muted-foreground mt-1">This agent is paused pending your approval or review.</p>
             </div>
           )}
 
-          {/* Actions Timeline */}
           <div>
             <div className="flex items-center gap-2 mb-3">
               <Play className="w-3.5 h-3.5 text-primary" />
@@ -97,8 +150,9 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
                   </div>
                   <div className="pb-3 min-w-0 flex-1">
                     <p className="text-xs text-foreground/90">{action.description}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <span className="text-[10px] font-mono text-muted-foreground">{action.timestamp}</span>
+                      {action.actorLabel && <span className="text-[10px] font-mono text-primary/70">{action.actorLabel}</span>}
                       {action.tool && <span className="text-[10px] font-mono text-accent/70">{action.tool}</span>}
                       {action.duration && <span className="text-[10px] font-mono text-muted-foreground">{action.duration}</span>}
                     </div>

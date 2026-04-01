@@ -29,6 +29,7 @@ const AgentNode = ({ agent, index, onClick }: AgentNodeProps) => {
   const col = index % cols;
   const x = 80 + col * 130;
   const y = 60 + row * 120;
+  const label = agent.hierarchy?.isSubSession ? 'sub-session' : 'root';
 
   const getMotionProps = () => {
     switch (agent.state) {
@@ -58,11 +59,12 @@ const AgentNode = ({ agent, index, onClick }: AgentNodeProps) => {
       <motion.circle
         cx={x}
         cy={y}
-        r={30}
+        r={agent.hierarchy?.isSubSession ? 24 : 30}
         fill="none"
         stroke={style.fill}
         strokeWidth={1}
         opacity={0.15}
+        strokeDasharray={agent.hierarchy?.isSubSession ? '4 3' : undefined}
         {...(agent.state === 'awaiting_approval' ? {
           animate: { r: [30, 38, 30], opacity: [0.15, 0.3, 0.15] },
           transition: { duration: 2, repeat: Infinity },
@@ -107,10 +109,11 @@ const AgentNode = ({ agent, index, onClick }: AgentNodeProps) => {
       <motion.circle
         cx={x}
         cy={y}
-        r={18}
+        r={agent.hierarchy?.isSubSession ? 14 : 18}
         fill={style.glow}
         stroke={style.fill}
         strokeWidth={1.5}
+        strokeDasharray={agent.hierarchy?.isSubSession ? '2 2' : undefined}
         {...getMotionProps()}
       />
 
@@ -132,7 +135,7 @@ const AgentNode = ({ agent, index, onClick }: AgentNodeProps) => {
         textAnchor="middle"
         className="fill-muted-foreground text-[8px] font-mono uppercase"
       >
-        {agent.state.replace('_', ' ')}
+        {label}
       </text>
     </g>
   );
