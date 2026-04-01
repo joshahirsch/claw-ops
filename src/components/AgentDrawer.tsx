@@ -1,6 +1,6 @@
 import { Agent } from '@/data/types';
 import StateIndicator from './StateIndicator';
-import { X, Clock, Target, Wrench, AlertTriangle, Play, GitBranch, Network } from 'lucide-react';
+import { X, Clock, Target, Wrench, AlertTriangle, Play, GitBranch, Network, Layers3 } from 'lucide-react';
 
 interface AgentDrawerProps {
   agent: Agent | null;
@@ -56,7 +56,23 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           )}
 
-          {/* Objective */}
+          {agent.childRollup && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Layers3 className="w-3.5 h-3.5 text-primary" />
+                <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Child Rollup</h3>
+              </div>
+              <div className="space-y-1.5 text-xs text-foreground/85">
+                <div>Summary: <span className="font-mono text-muted-foreground">{agent.childRollup.summary}</span></div>
+                <div>Active: <span className="font-mono text-muted-foreground">{agent.childRollup.active}</span></div>
+                <div>Waiting: <span className="font-mono text-muted-foreground">{agent.childRollup.waiting}</span></div>
+                <div>Failed: <span className="font-mono text-muted-foreground">{agent.childRollup.failed}</span></div>
+                <div>Stalled: <span className="font-mono text-muted-foreground">{agent.childRollup.stalled}</span></div>
+                <div>Completed: <span className="font-mono text-muted-foreground">{agent.childRollup.completed}</span></div>
+              </div>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Target className="w-3.5 h-3.5 text-primary" />
@@ -65,7 +81,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             <p className="text-sm text-foreground/90">{agent.objective}</p>
           </div>
 
-          {/* Current Task */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Clock className="w-3.5 h-3.5 text-primary" />
@@ -75,7 +90,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             <p className="text-xs text-muted-foreground mt-1">Elapsed: {agent.elapsedTime}</p>
           </div>
 
-          {/* Last Tool */}
           <div className="flex items-center gap-4 text-sm">
             <div className="flex items-center gap-2">
               <Wrench className="w-3.5 h-3.5 text-accent" />
@@ -83,7 +97,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           </div>
 
-          {/* Blockers */}
           {agent.blockers.length > 0 && (
             <div>
               <div className="flex items-center gap-2 mb-2">
@@ -100,7 +113,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           )}
 
-          {/* Approval Status */}
           {agent.approvalNeeded && (
             <div className="bg-warning/5 border border-warning/20 rounded-lg p-3">
               <p className="text-xs font-medium text-warning">⚠ Approval Required</p>
@@ -108,7 +120,6 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
             </div>
           )}
 
-          {/* Actions Timeline */}
           <div>
             <div className="flex items-center gap-2 mb-3">
               <Play className="w-3.5 h-3.5 text-primary" />

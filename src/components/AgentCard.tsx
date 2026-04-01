@@ -1,6 +1,6 @@
 import { Agent } from '@/data/types';
 import StateIndicator from './StateIndicator';
-import { Clock, Wrench, Gauge, GitBranch } from 'lucide-react';
+import { Clock, Wrench, Gauge, GitBranch, Layers3 } from 'lucide-react';
 
 interface AgentCardProps {
   agent: Agent;
@@ -9,6 +9,7 @@ interface AgentCardProps {
 
 const AgentCard = ({ agent, onClick }: AgentCardProps) => {
   const confidenceColor = agent.confidence >= 0.8 ? 'text-success' : agent.confidence >= 0.5 ? 'text-warning' : 'text-destructive';
+  const showRollup = !agent.hierarchy?.isSubSession && agent.childRollup;
 
   return (
     <button
@@ -30,6 +31,12 @@ const AgentCard = ({ agent, onClick }: AgentCardProps) => {
             <div className="flex items-center gap-1 mt-1 text-[10px] font-mono text-accent/80">
               <GitBranch className="w-3 h-3" />
               child of {agent.parentAgentName}
+            </div>
+          )}
+          {showRollup && (
+            <div className="flex items-center gap-1 mt-1 text-[10px] font-mono text-primary/80">
+              <Layers3 className="w-3 h-3" />
+              {agent.childRollup.summary}
             </div>
           )}
         </div>

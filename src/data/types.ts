@@ -18,6 +18,16 @@ export interface AgentHierarchy {
   isSubSession: boolean;
 }
 
+export interface ChildSessionRollup {
+  total: number;
+  active: number;
+  waiting: number;
+  failed: number;
+  stalled: number;
+  completed: number;
+  summary: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -36,6 +46,7 @@ export interface Agent {
   parentAgentName?: string;
   rootAgentName?: string;
   hierarchy?: AgentHierarchy;
+  childRollup?: ChildSessionRollup;
 }
 
 export interface AgentAction {
