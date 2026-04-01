@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse, Search } from 'lucide-react';
-import { getConfig, saveConfig, type OpenClawConfig, type AuthMode } from '@/lib/openclaw/config';
+import { saveConfig, type OpenClawConfig, type AuthMode, useOpenClawConfig } from '@/lib/openclaw/config';
 import { runBasicProbe, runEchoProbe, runHealthProbe, runSSEProbe, type ProbeResult } from '@/lib/openclaw/client';
 import { toast } from 'sonner';
 
@@ -9,6 +9,17 @@ interface HealthItem {
   status: 'connected' | 'disconnected' | 'degraded';
   detail: string;
 }
+
+interface DiagnosticsState {
+  connectionStatus: 'untested' | 'connected' | 'failed';
+  basicResult: ProbeResult | null;
+  sseResult: ProbeResult | null;
+  healthResult: ProbeResult | null;
+  echoResult: ProbeResult | null;
+}
+
+const DIAGNOSTICS_STORAGE_KEY = 'openclaw-diagnostics';
+const MAX_DIAGNOSTIC_CHARS = 4000;
 
 const tools = [
   { name: 'gmail.send', enabled: true },
@@ -30,6 +41,14 @@ const skills = [
   { name: 'CRM Integration', version: '0.9.2' },
 ];
 
+const emptyDiagnostics: DiagnosticsState = {
+  connectionStatus: 'untested',
+  basicResult: null,
+  sseResult: null,
+  healthResult: null,
+  echoResult: null,
+};
+
 const statusIcon = (status: HealthItem['status']) => {
   switch (status) {
     case 'connected': return <CheckCircle className="w-4 h-4 text-success" />;
@@ -42,20 +61,54 @@ const inputClass = 'w-full px-3 py-2 rounded-md bg-secondary border border-borde
 
 const prettyPrint = (value: unknown) => JSON.stringify(value, null, 2);
 
+function loadDiagnosticsState(): DiagnosticsState {
+  if (typeof window === 'undefined') return emptyDiagnostics;
+
+  try {
+    const raw = window.localStorage.getItem(DIAGNOSTICS_STORAGE_KEY);
+    if (!raw) return emptyDiagnostics;
+    return { ...emptyDiagnostics, ...JSON.parse(raw) };
+  } catch {
+    return emptyDiagnostics;
+  }
+}
+
+function saveDiagnosticsState(value: DiagnosticsState) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(DIAGNOSTICS_STORAGE_KEY, JSON.stringify(value));
+}
+
 const DiagnosticsBlock = ({ label, value }: { label: string; value: unknown }) => {
+  const [expanded, setExpanded] = useState(false);
+
   if (value === undefined || value === null) return null;
+
+  const text = typeof value === 'string' ? value : prettyPrint(value);
+  const isLong = text.length > MAX_DIAGNOSTIC_CHARS;
+  const displayText = expanded || !isLong
+    ? text
+    : `${text.slice(0, MAX_DIAGNOSTIC_CHARS)}\n… [truncated ${text.length - MAX_DIAGNOSTIC_CHARS} chars]`;
 
   return (
     <div>
-      <span className="text-muted-foreground">{label}:</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-muted-foreground">{label}:</span>
+        {isLong && (
+          <button
+            onClick={() => setExpanded((prev) => !prev)}
+            className="text-[11px] text-primary hover:text-primary/80 transition-colors"
+          >
+            {expanded ? 'Collapse' : 'Expand'}
+          </button>
+        )}
+      </div>
       <pre className="mt-1 p-2 rounded bg-background/80 border border-border whitespace-pre-wrap break-all max-h-40 overflow-y-auto text-foreground">
-        {typeof value === 'string' ? value : prettyPrint(value)}
+        {displayText}
       </pre>
     </div>
   );
 };
 
-/** Render a key-value row in the diagnostics panel */
 const DiagRow = ({ label, value, error }: { label: string; value: React.ReactNode; error?: boolean }) => (
   <>
     <span className="text-muted-foreground select-none">{label}:</span>
@@ -63,7 +116,6 @@ const DiagRow = ({ label, value, error }: { label: string; value: React.ReactNod
   </>
 );
 
-/** Render the full probe result diagnostics */
 const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeType: string }) => {
   const statusColor = result.ok ? 'border-success/20 bg-success/5' : 'border-destructive/20 bg-destructive/5';
   const statusLabel = result.ok
@@ -105,10 +157,7 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
         <DiagRow label="Error label" value={result.errorLabel || result.message} error={!!(result.errorLabel || result.message)} />
         <DiagRow label="Latency" value={result.latencyMs !== undefined ? `${result.latencyMs}ms` : 'N/A'} />
         <DiagRow label="OPTIONS hit" value={typeof result.optionsHit === 'boolean' ? (result.optionsHit ? 'Yes' : 'No') : 'N/A'} />
-
-        {result.clientError && (
-          <DiagRow label="Client error" value={result.clientError} error />
-        )}
+        {result.clientError && <DiagRow label="Client error" value={result.clientError} error />}
       </div>
 
       <DiagnosticsBlock label="Browser request headers sent" value={result.requestHeadersSent} />
@@ -124,29 +173,82 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
 };
 
 const SettingsPage = () => {
-  const [config, setConfig] = useState<OpenClawConfig>(getConfig);
+  const savedConfig = useOpenClawConfig();
+  const [config, setConfig] = useState<OpenClawConfig>(savedConfig);
   const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | 'echo' | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'untested' | 'connected' | 'failed'>('untested');
-  const [basicResult, setBasicResult] = useState<ProbeResult | null>(null);
-  const [sseResult, setSSEResult] = useState<ProbeResult | null>(null);
-  const [healthResult, setHealthResult] = useState<ProbeResult | null>(null);
-  const [echoResult, setEchoResult] = useState<ProbeResult | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<DiagnosticsState['connectionStatus']>(() => loadDiagnosticsState().connectionStatus);
+  const [basicResult, setBasicResult] = useState<ProbeResult | null>(() => loadDiagnosticsState().basicResult);
+  const [sseResult, setSSEResult] = useState<ProbeResult | null>(() => loadDiagnosticsState().sseResult);
+  const [healthResult, setHealthResult] = useState<ProbeResult | null>(() => loadDiagnosticsState().healthResult);
+  const [echoResult, setEchoResult] = useState<ProbeResult | null>(() => loadDiagnosticsState().echoResult);
+
+  useEffect(() => {
+    setConfig(savedConfig);
+  }, [savedConfig]);
+
+  useEffect(() => {
+    saveDiagnosticsState({ connectionStatus, basicResult, sseResult, healthResult, echoResult });
+  }, [connectionStatus, basicResult, sseResult, healthResult, echoResult]);
+
+  const updateConfig = (patch: Partial<OpenClawConfig>) => setConfig((prev) => ({ ...prev, ...patch }));
+
+  const sessionKey = config.sessionKeys[0] || 'test';
+  const hasSavedConnection = savedConfig.enabled && Boolean(savedConfig.baseUrl);
+  const hasWorkingBasic = Boolean(basicResult?.ok);
+  const hasWorkingSSE = Boolean(sseResult?.ok);
+  const hasWorkingProxy = Boolean(healthResult?.ok);
 
   const health: HealthItem[] = [
     {
       label: 'OpenClaw Connection',
-      status: config.enabled && connectionStatus === 'connected' ? 'connected' : config.enabled && connectionStatus === 'failed' ? 'disconnected' : 'disconnected',
-      detail: config.enabled && connectionStatus === 'connected'
-        ? `Connected, latency ${basicResult?.latencyMs}ms`
-        : config.enabled && connectionStatus === 'failed'
-          ? basicResult?.message || basicResult?.errorLabel || basicResult?.clientError || 'Connection failed'
-          : 'Not configured',
+      status: !savedConfig.enabled
+        ? 'disconnected'
+        : hasWorkingBasic || connectionStatus === 'connected'
+          ? 'connected'
+          : connectionStatus === 'failed'
+            ? 'disconnected'
+            : 'degraded',
+      detail: !savedConfig.enabled
+        ? 'Not configured'
+        : hasWorkingBasic || connectionStatus === 'connected'
+          ? `Connected${basicResult?.latencyMs ? `, latency ${basicResult.latencyMs}ms` : ''}`
+          : connectionStatus === 'failed'
+            ? basicResult?.message || basicResult?.errorLabel || basicResult?.clientError || 'Connection failed'
+            : 'Configured, awaiting verification',
     },
-    { label: 'Gateway Status', status: healthResult?.ok ? 'connected' : 'disconnected', detail: healthResult?.ok ? 'Proxy reachable' : config.enabled ? config.baseUrl : 'No endpoint set' },
-    { label: 'Session Stream', status: config.enabled && sseResult?.ok ? 'connected' : 'disconnected', detail: config.enabled && sseResult?.ok ? 'SSE follow=1 OK' : 'Untested' },
+    {
+      label: 'Gateway Status',
+      status: !savedConfig.enabled
+        ? 'disconnected'
+        : hasWorkingProxy
+          ? 'connected'
+          : hasSavedConnection
+            ? 'degraded'
+            : 'disconnected',
+      detail: !savedConfig.enabled
+        ? 'No endpoint set'
+        : hasWorkingProxy
+          ? 'Proxy reachable'
+          : savedConfig.baseUrl || 'Configured, proxy not yet tested',
+    },
+    {
+      label: 'Session Stream',
+      status: !savedConfig.enabled
+        ? 'disconnected'
+        : hasWorkingSSE
+          ? 'connected'
+          : hasWorkingBasic
+            ? 'degraded'
+            : 'disconnected',
+      detail: !savedConfig.enabled
+        ? 'Untested'
+        : hasWorkingSSE
+          ? 'SSE follow=1 OK'
+          : hasWorkingBasic
+            ? 'Configured, SSE not yet verified'
+            : 'Untested',
+    },
   ];
-
-  const sessionKey = config.sessionKeys[0] || 'test';
 
   const handleBasicProbe = async () => {
     setProbing('basic');
@@ -231,11 +333,14 @@ const SettingsPage = () => {
     const next = { ...config, enabled: !config.enabled };
     setConfig(next);
     saveConfig(next);
+
     if (!next.enabled) {
       setConnectionStatus('untested');
       setBasicResult(null);
       setSSEResult(null);
       setEchoResult(null);
+      setHealthResult(null);
+      saveDiagnosticsState(emptyDiagnostics);
       toast.info('OpenClaw disconnected — using demo data');
     }
   };
@@ -253,10 +358,7 @@ const SettingsPage = () => {
             {config.enabled ? <Wifi className="w-4 h-4 text-success" /> : <WifiOff className="w-4 h-4 text-muted-foreground" />}
             <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">OpenClaw Connection</h2>
           </div>
-          <button
-            onClick={handleToggle}
-            className={`relative w-10 h-5 rounded-full transition-colors ${config.enabled ? 'bg-success' : 'bg-muted'}`}
-          >
+          <button onClick={handleToggle} className={`relative w-10 h-5 rounded-full transition-colors ${config.enabled ? 'bg-success' : 'bg-muted'}`}>
             <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-foreground transition-transform ${config.enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
           </button>
         </div>
@@ -264,49 +366,26 @@ const SettingsPage = () => {
         <div className="space-y-3">
           <div>
             <label className="text-xs text-muted-foreground font-mono block mb-1">Base URL (HTTP)</label>
-            <input
-              type="text"
-              value={config.baseUrl}
-              onChange={(e) => setConfig({ ...config, baseUrl: e.target.value })}
-              placeholder="https://linux-process-las-talk.trycloudflare.com"
-              className={inputClass}
-            />
+            <input type="text" value={config.baseUrl} onChange={(e) => updateConfig({ baseUrl: e.target.value })} placeholder="https://linux-process-las-talk.trycloudflare.com" className={inputClass} />
           </div>
 
           <div>
             <label className="text-xs text-muted-foreground font-mono block mb-1">WebSocket URL</label>
-            <input
-              type="text"
-              value={config.wsUrl}
-              onChange={(e) => setConfig({ ...config, wsUrl: e.target.value })}
-              placeholder="ws://localhost:3000"
-              className={inputClass}
-            />
+            <input type="text" value={config.wsUrl} onChange={(e) => updateConfig({ wsUrl: e.target.value })} placeholder="ws://localhost:3000" className={inputClass} />
           </div>
 
           <div>
             <label className="text-xs text-muted-foreground font-mono block mb-1">Session Keys (comma-separated)</label>
-            <input
-              type="text"
-              value={config.sessionKeys.join(', ')}
-              onChange={(e) => setConfig({ ...config, sessionKeys: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-              placeholder="agent:main:main"
-              className={inputClass}
-            />
+            <input type="text" value={config.sessionKeys.join(', ')} onChange={(e) => updateConfig({ sessionKeys: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} placeholder="agent:main:main" className={inputClass} />
           </div>
 
           <div className="border-t border-border pt-3 mt-3">
             <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-2">Authentication</h3>
-
             <div className="space-y-3">
               <div>
                 <label className="text-xs text-muted-foreground font-mono block mb-1">Auth Mode</label>
                 <div className="relative">
-                  <select
-                    value={config.authMode}
-                    onChange={(e) => setConfig({ ...config, authMode: e.target.value as AuthMode })}
-                    className={`${inputClass} appearance-none pr-8`}
-                  >
+                  <select value={config.authMode} onChange={(e) => updateConfig({ authMode: e.target.value as AuthMode })} className={`${inputClass} appearance-none pr-8`}>
                     <option value="none">None</option>
                     <option value="bearer">Bearer Token</option>
                     <option value="custom">Custom Header</option>
@@ -319,36 +398,18 @@ const SettingsPage = () => {
                 <>
                   <div>
                     <label className="text-xs text-muted-foreground font-mono block mb-1">Token</label>
-                    <input
-                      type="password"
-                      value={config.authToken}
-                      onChange={(e) => setConfig({ ...config, authToken: e.target.value })}
-                      placeholder="your-auth-token"
-                      className={inputClass}
-                    />
+                    <input type="password" value={config.authToken} onChange={(e) => updateConfig({ authToken: e.target.value })} placeholder="your-auth-token" className={inputClass} />
                   </div>
 
                   {config.authMode === 'custom' && (
                     <>
                       <div>
                         <label className="text-xs text-muted-foreground font-mono block mb-1">Header Name</label>
-                        <input
-                          type="text"
-                          value={config.authHeaderName}
-                          onChange={(e) => setConfig({ ...config, authHeaderName: e.target.value })}
-                          placeholder="Authorization"
-                          className={inputClass}
-                        />
+                        <input type="text" value={config.authHeaderName} onChange={(e) => updateConfig({ authHeaderName: e.target.value })} placeholder="Authorization" className={inputClass} />
                       </div>
                       <div>
                         <label className="text-xs text-muted-foreground font-mono block mb-1">Header Prefix</label>
-                        <input
-                          type="text"
-                          value={config.authHeaderPrefix}
-                          onChange={(e) => setConfig({ ...config, authHeaderPrefix: e.target.value })}
-                          placeholder="Bearer "
-                          className={inputClass}
-                        />
+                        <input type="text" value={config.authHeaderPrefix} onChange={(e) => updateConfig({ authHeaderPrefix: e.target.value })} placeholder="Bearer " className={inputClass} />
                       </div>
                     </>
                   )}
@@ -358,64 +419,37 @@ const SettingsPage = () => {
           </div>
 
           <div className="flex gap-2">
-            <button
-              onClick={handleSave}
-              className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors"
-            >
-              Save
-            </button>
+            <button onClick={handleSave} className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors">Save</button>
           </div>
 
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Diagnostics now send only standard browser headers to the proxy and render exactly what the browser sent versus what the function received.
-          </p>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">Diagnostics now send only standard browser headers to the proxy and render exactly what the browser sent versus what the function received.</p>
         </div>
       </div>
 
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Connection Diagnostics</h2>
-        <p className="text-xs text-muted-foreground mb-3">
-          Run probes to isolate browser request shape, proxy reachability, and upstream history fetch behavior. Session key: <span className="font-mono text-foreground">{sessionKey}</span>
-        </p>
+        <p className="text-xs text-muted-foreground mb-3">Run probes to isolate browser request shape, proxy reachability, and upstream history fetch behavior. Session key: <span className="font-mono text-foreground">{sessionKey}</span></p>
 
         <div className="flex flex-wrap gap-2 mb-4">
-          <button
-            onClick={handleHealthProbe}
-            disabled={probing !== null}
-            className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors disabled:opacity-40 flex items-center gap-1.5"
-          >
+          <button onClick={handleHealthProbe} disabled={probing !== null} className="px-3 py-2 rounded-md bg-primary/10 text-primary text-xs font-mono border border-primary/20 hover:bg-primary/20 transition-colors disabled:opacity-40 flex items-center gap-1.5">
             {probing === 'health' ? <Loader2 className="w-3 h-3 animate-spin" /> : <HeartPulse className="w-3 h-3" />}
             Test Proxy Only
           </button>
-          <button
-            onClick={handleEchoProbe}
-            disabled={probing !== null}
-            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
-          >
+          <button onClick={handleEchoProbe} disabled={probing !== null} className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5">
             {probing === 'echo' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
             Run Echo Probe
           </button>
-          <button
-            onClick={handleBasicProbe}
-            disabled={probing !== null || !config.enabled}
-            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
-          >
+          <button onClick={handleBasicProbe} disabled={probing !== null || !config.enabled} className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5">
             {probing === 'basic' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Activity className="w-3 h-3" />}
             Run Basic Probe
           </button>
-          <button
-            onClick={handleSSEProbe}
-            disabled={probing !== null || !config.enabled}
-            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
-          >
+          <button onClick={handleSSEProbe} disabled={probing !== null || !config.enabled} className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground text-xs font-mono border border-border hover:bg-secondary/80 transition-colors disabled:opacity-40 flex items-center gap-1.5">
             {probing === 'sse' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
             Run SSE Probe
           </button>
         </div>
 
-        {!config.enabled && (
-          <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. Proxy-only and echo probes work regardless.</p>
-        )}
+        {!config.enabled && <p className="text-xs text-muted-foreground italic">Enable the OpenClaw connection above to run upstream probes. Proxy-only and echo probes work regardless.</p>}
 
         <div className="space-y-3">
           {healthResult && <ProbeDiagnostics result={healthResult} probeType="Proxy health" />}
@@ -428,7 +462,7 @@ const SettingsPage = () => {
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Environment Health</h2>
         <div className="space-y-2">
-          {health.map(item => (
+          {health.map((item) => (
             <div key={item.label} className="flex items-center justify-between p-3 rounded-md bg-background/50">
               <div className="flex items-center gap-3">
                 {statusIcon(item.status)}
@@ -437,11 +471,7 @@ const SettingsPage = () => {
                   <p className="text-xs text-muted-foreground">{item.detail}</p>
                 </div>
               </div>
-              <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-full border ${
-                item.status === 'connected' ? 'bg-success/10 text-success border-success/20' :
-                item.status === 'degraded' ? 'bg-warning/10 text-warning border-warning/20' :
-                'bg-destructive/10 text-destructive border-destructive/20'
-              }`}>
+              <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-full border ${item.status === 'connected' ? 'bg-success/10 text-success border-success/20' : item.status === 'degraded' ? 'bg-warning/10 text-warning border-warning/20' : 'bg-destructive/10 text-destructive border-destructive/20'}`}>
                 {item.status}
               </span>
             </div>
@@ -452,15 +482,8 @@ const SettingsPage = () => {
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Tools Enabled</h2>
         <div className="flex flex-wrap gap-2">
-          {tools.map(tool => (
-            <span
-              key={tool.name}
-              className={`text-xs font-mono px-3 py-1.5 rounded-md border ${
-                tool.enabled
-                  ? 'bg-primary/5 text-primary/80 border-primary/20'
-                  : 'bg-destructive/5 text-destructive/60 border-destructive/20 line-through'
-              }`}
-            >
+          {tools.map((tool) => (
+            <span key={tool.name} className={`text-xs font-mono px-3 py-1.5 rounded-md border ${tool.enabled ? 'bg-primary/5 text-primary/80 border-primary/20' : 'bg-destructive/5 text-destructive/60 border-destructive/20 line-through'}`}>
               {tool.name}
             </span>
           ))}
@@ -470,7 +493,7 @@ const SettingsPage = () => {
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Skills Installed</h2>
         <div className="space-y-1.5">
-          {skills.map(skill => (
+          {skills.map((skill) => (
             <div key={skill.name} className="flex items-center justify-between p-2 rounded-md hover:bg-background/50 transition-colors">
               <span className="text-sm text-foreground">{skill.name}</span>
               <span className="text-[11px] font-mono text-muted-foreground">v{skill.version}</span>

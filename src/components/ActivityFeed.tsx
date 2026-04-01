@@ -1,5 +1,5 @@
 import { ActivityEvent } from '@/data/types';
-import { Bot, Wrench, AlertTriangle, ShieldCheck, CheckCircle, MessageSquare, Pause } from 'lucide-react';
+import { Bot, Wrench, AlertTriangle, ShieldCheck, CheckCircle, MessageSquare, Pause, GitBranch } from 'lucide-react';
 
 interface ActivityFeedProps {
   events: ActivityEvent[];
@@ -40,9 +40,15 @@ const ActivityFeed = ({ events, maxItems = 8 }: ActivityFeedProps) => {
               <IconComponent className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${severityColors[event.severity]}`} />
               <div className="min-w-0 flex-1">
                 <p className="text-xs text-foreground/90 leading-relaxed line-clamp-2">{event.message}</p>
-                <div className="flex items-center gap-2 mt-0.5">
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                   <span className="text-[10px] font-mono text-muted-foreground">{event.timestamp}</span>
                   <span className="text-[10px] font-mono text-primary/70">{event.agentName}</span>
+                  {event.isSubSession && event.parentAgentName && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-mono text-accent/80">
+                      <GitBranch className="w-3 h-3" />
+                      via {event.parentAgentName}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>

@@ -10,6 +10,31 @@ export type AgentState =
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 
+export interface AgentHierarchy {
+  rootSessionKey: string;
+  parentSessionKey?: string;
+  childSessionCount?: number;
+  depth: number;
+  isSubSession: boolean;
+}
+
+export interface ChildSessionRollup {
+  total: number;
+  active: number;
+  waiting: number;
+  failed: number;
+  stalled: number;
+  completed: number;
+  summary: string;
+}
+
+export interface ConflictSummary {
+  detected: boolean;
+  severity: 'medium' | 'high';
+  summary: string;
+  conflictingAgentKinds: string[];
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -23,6 +48,13 @@ export interface Agent {
   blockers: string[];
   approvalNeeded: boolean;
   actions: AgentAction[];
+  agentKind?: string;
+  displayRole?: string;
+  parentAgentName?: string;
+  rootAgentName?: string;
+  hierarchy?: AgentHierarchy;
+  childRollup?: ChildSessionRollup;
+  conflictSummary?: ConflictSummary;
 }
 
 export interface AgentAction {
@@ -32,6 +64,7 @@ export interface AgentAction {
   description: string;
   tool?: string;
   duration?: string;
+  actorLabel?: string;
 }
 
 export interface ActivityEvent {
@@ -43,6 +76,10 @@ export interface ActivityEvent {
   message: string;
   severity: Severity;
   tool?: string;
+  agentKind?: string;
+  parentAgentName?: string;
+  rootAgentName?: string;
+  isSubSession?: boolean;
 }
 
 export interface Approval {
