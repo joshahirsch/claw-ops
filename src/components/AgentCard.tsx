@@ -1,6 +1,6 @@
 import { Agent } from '@/data/types';
 import StateIndicator from './StateIndicator';
-import { Clock, Wrench, Gauge } from 'lucide-react';
+import { Clock, Wrench, Gauge, GitBranch } from 'lucide-react';
 
 interface AgentCardProps {
   agent: Agent;
@@ -15,10 +15,23 @@ const AgentCard = ({ agent, onClick }: AgentCardProps) => {
       onClick={() => onClick(agent)}
       className="glass rounded-lg p-4 text-left w-full transition-all duration-200 hover:border-primary/30 hover:bg-card/80 group"
     >
-      <div className="flex items-start justify-between mb-3">
-        <div>
-          <h4 className="text-sm font-semibold text-foreground group-hover:text-primary transition-colors">{agent.name}</h4>
+      <div className="flex items-start justify-between mb-3 gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4 className="text-sm font-semibold text-foreground group-hover:text-primary transition-colors">{agent.name}</h4>
+            {agent.displayRole && (
+              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground bg-secondary px-2 py-0.5 rounded">
+                {agent.displayRole}
+              </span>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{agent.currentTask}</p>
+          {agent.parentAgentName && (
+            <div className="flex items-center gap-1 mt-1 text-[10px] font-mono text-accent/80">
+              <GitBranch className="w-3 h-3" />
+              child of {agent.parentAgentName}
+            </div>
+          )}
         </div>
         <StateIndicator state={agent.state} />
       </div>

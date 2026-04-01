@@ -11,6 +11,7 @@
  */
 import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
 import type { Agent, AgentState, AgentAction, ActivityEvent, Severity } from '@/data/types';
+import { buildWalterSessionTree, sessionsToWalterNodes, type WalterSessionNode, type WalterSessionTreeNode } from './subagents';
 
 // ─── Session → Agent ────────────────────────────────────────────────
 
@@ -35,69 +36,181 @@ function formatElapsed(startIso: string): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function messageToAction(msg: OpenClawMessage): AgentAction {
-  const time = new Date(msg.timestamp);
+function formatClockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function buildAgentName(node: WalterSessionNode): string {
+  if (node.agent === 'walter') return 'Walter';
+  return `Walter:${node.agent}`;
+}
+
+function buildDisplayRole(node: WalterSessionNode): string {
+  return node.agent === 'walter' ? 'Root orchestrator' : `Sub-agent · ${node.agent.replace(/_/g, ' ')}`;
+}
+
+function messageToAction(msg: OpenClawMessage, actorLabel: string): AgentAction {
   return {
     id: msg.id,
-    timestamp: time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    timestamp: formatClockTime(msg.timestamp),
     type: msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'reasoning' : 'incoming',
     description: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
     tool: msg.toolName,
+    actorLabel,
   };
 }
 
-export function sessionToAgent(session: OpenClawSession): Agent {
+function sessionObjective(messages: OpenClawMessage[], node: WalterSessionNode, parentAgentName?: string): string {
+  const firstContent = typeof messages[0]?.content === 'string' ? messages[0].content.slice(0, 120) : 'Unknown objective';
+  if (node.agent === 'walter') return firstContent;
+  return parentAgentName ? `${firstContent} · delegated by ${parentAgentName}` : firstContent;
+}
+
+function buildAgentBlockers(state: AgentState, node: WalterSessionNode, childCount: number): string[] {
+  const blockers: string[] = [];
+  if (state === 'awaiting_approval') blockers.push('Awaiting human approval');
+  if (state === 'stalled') blockers.push('Sub-session stalled and may require Walter review.');
+  if (node.agent === 'walter' && childCount > 0) blockers.push(`${childCount} active or completed child sub-session(s) linked to this root session.`);
+  return blockers;
+}
+
+function flattenTree(tree: WalterSessionTreeNode[]): WalterSessionTreeNode[] {
+  const ordered: WalterSessionTreeNode[] = [];
+  const walk = (node: WalterSessionTreeNode) => {
+    ordered.push(node);
+    node.children.forEach(walk);
+  };
+  tree.forEach(walk);
+  return ordered;
+}
+
+function buildNodeMaps(sessions: OpenClawSession[]) {
+  const nodes = sessionsToWalterNodes(sessions);
+  const tree = buildWalterSessionTree(nodes);
+  const ordered = flattenTree(tree);
+  const nodeMap = new Map<string, WalterSessionTreeNode>();
+  const childCountMap = new Map<string, number>();
+
+  ordered.forEach((node) => {
+    nodeMap.set(node.sessionKey, node);
+    childCountMap.set(node.sessionKey, node.children.length);
+  });
+
+  return { ordered, nodeMap, childCountMap };
+}
+
+export function sessionToAgent(
+  session: OpenClawSession,
+  node: WalterSessionNode,
+  childCount = 0,
+  parentAgentName?: string,
+  rootAgentName?: string,
+): Agent {
   const { messages, status } = session;
   const state = phaseToState(status.phase, messages);
   const lastToolMsg = [...messages].reverse().find((m) => m.role === 'toolResult');
   const firstMsg = messages[0];
   const lastMsg = messages[messages.length - 1];
+  const agentName = buildAgentName(node);
 
   return {
     id: session.sessionKey,
-    name: `Session-${session.sessionKey.slice(0, 6)}`,
+    name: agentName,
     state,
     currentTask: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 80) : 'Processing…',
     elapsedTime: firstMsg ? formatElapsed(firstMsg.timestamp) : '—',
     lastTool: lastToolMsg?.toolName || 'none',
     confidence: state === 'error' ? 0.3 : state === 'complete' ? 0.99 : 0.8,
     riskLevel: state === 'error' || state === 'stalled' ? 'high' : 'low',
-    objective: typeof messages[0]?.content === 'string' ? messages[0].content.slice(0, 120) : 'Unknown objective',
-    blockers: state === 'awaiting_approval' ? ['Awaiting human approval'] : [],
+    objective: sessionObjective(messages, node, parentAgentName),
+    blockers: buildAgentBlockers(state, node, childCount),
     approvalNeeded: state === 'awaiting_approval',
-    actions: messages.slice(-10).map(messageToAction),
+    actions: messages.slice(-10).map((message) => messageToAction(message, agentName)),
+    agentKind: node.agent,
+    displayRole: buildDisplayRole(node),
+    parentAgentName,
+    rootAgentName,
+    hierarchy: {
+      rootSessionKey: node.rootSessionKey,
+      parentSessionKey: node.parentSessionKey,
+      childSessionCount: childCount,
+      depth: node.parentSessionKey ? 1 : 0,
+      isSubSession: node.agent !== 'walter',
+    },
   };
 }
 
 // ─── Messages → Activity Events ─────────────────────────────────────
 
-export function messageToActivityEvent(msg: OpenClawMessage, session: OpenClawSession): ActivityEvent {
-  const time = new Date(msg.timestamp);
+export function messageToActivityEvent(
+  msg: OpenClawMessage,
+  session: OpenClawSession,
+  node: WalterSessionNode,
+  parentAgentName?: string,
+  rootAgentName?: string,
+): ActivityEvent & { sortTimestamp: string } {
   const severity: Severity = msg.role === 'toolResult' && msg.toolOutput?.includes('error') ? 'high' : 'low';
+  const agentName = buildAgentName(node);
 
   return {
     id: msg.id,
-    timestamp: time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-    agentName: `Session-${session.sessionKey.slice(0, 6)}`,
+    timestamp: formatClockTime(msg.timestamp),
+    agentName,
     agentId: session.sessionKey,
     type: msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'reasoning' : 'incoming',
     message: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
     severity,
     tool: msg.toolName,
+    agentKind: node.agent,
+    parentAgentName,
+    rootAgentName,
+    isSubSession: node.agent !== 'walter',
+    sortTimestamp: msg.timestamp,
   };
 }
 
 // ─── Batch helpers ───────────────────────────────────────────────────
 
 export function sessionsToAgents(sessions: OpenClawSession[]): Agent[] {
-  return sessions.map((s) => sessionToAgent(s));
+  const { ordered, nodeMap, childCountMap } = buildNodeMaps(sessions);
+  const sessionMap = new Map(sessions.map((session) => [session.sessionKey, session]));
+
+  return ordered
+    .map((node) => {
+      const session = sessionMap.get(node.sessionKey);
+      if (!session) return null;
+      const parentAgentName = node.parentSessionKey ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node) : undefined;
+      const rootAgentName = buildAgentName(nodeMap.get(node.rootSessionKey) ?? node);
+      return sessionToAgent(
+        session,
+        node,
+        childCountMap.get(node.sessionKey) ?? 0,
+        parentAgentName,
+        rootAgentName,
+      );
+    })
+    .filter((agent): agent is Agent => agent !== null);
 }
 
 export function sessionsToActivity(sessions: OpenClawSession[], maxItems = 20): ActivityEvent[] {
+  const { nodeMap } = buildNodeMaps(sessions);
+
   return sessions
-    .flatMap((s) => s.messages.map((m) => messageToActivityEvent(m, s)))
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .slice(0, maxItems);
+    .flatMap((session) => {
+      const node = nodeMap.get(session.sessionKey);
+      if (!node) return [];
+      const parentAgentName = node.parentSessionKey ? buildAgentName(nodeMap.get(node.parentSessionKey) ?? node) : undefined;
+      const rootAgentName = buildAgentName(nodeMap.get(node.rootSessionKey) ?? node);
+      return session.messages.map((message) => messageToActivityEvent(message, session, node, parentAgentName, rootAgentName));
+    })
+    .sort((a, b) => b.sortTimestamp.localeCompare(a.sortTimestamp))
+    .slice(0, maxItems)
+    .map(({ sortTimestamp, ...event }) => event);
 }
 
 // ─── JSONL Fallback Normaliser ───────────────────────────────────────
