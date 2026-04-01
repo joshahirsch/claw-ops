@@ -10,6 +10,34 @@ interface AgentDrawerProps {
 const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
   if (!agent) return null;
 
+  const isRootWalter = !agent.hierarchy?.isSubSession && agent.agentKind === 'walter';
+  const walterActions = isRootWalter ? agent.actions.filter((action) => action.actorLabel === 'Walter') : [];
+  const sessionActions = isRootWalter ? agent.actions.filter((action) => action.actorLabel !== 'Walter') : agent.actions;
+
+  const renderActions = (actions: typeof agent.actions) => (
+    <div className="space-y-0">
+      {actions.map((action, i) => (
+        <div key={action.id} className="flex gap-3 relative">
+          {i < actions.length - 1 && (
+            <div className="absolute left-[7px] top-5 bottom-0 w-px bg-border" />
+          )}
+          <div className="w-[15px] flex justify-center pt-1.5 shrink-0">
+            <div className={`w-2 h-2 rounded-full ${action.type === 'error' ? 'bg-destructive' : action.type === 'tool_use' ? 'bg-accent' : action.type === 'approval_request' ? 'bg-warning' : 'bg-primary/60'}`} />
+          </div>
+          <div className="pb-3 min-w-0 flex-1">
+            <p className="text-xs text-foreground/90">{action.description}</p>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+              <span className="text-[10px] font-mono text-muted-foreground">{action.timestamp}</span>
+              {action.actorLabel && <span className="text-[10px] font-mono text-primary/70">{action.actorLabel}</span>}
+              {action.tool && <span className="text-[10px] font-mono text-accent/70">{action.tool}</span>}
+              {action.duration && <span className="text-[10px] font-mono text-muted-foreground">{action.duration}</span>}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
       <div className="absolute inset-0 bg-background/60 backdrop-blur-sm" />
@@ -139,26 +167,19 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
               <Play className="w-3.5 h-3.5 text-primary" />
               <h3 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Recent Actions</h3>
             </div>
-            <div className="space-y-0">
-              {agent.actions.map((action, i) => (
-                <div key={action.id} className="flex gap-3 relative">
-                  {i < agent.actions.length - 1 && (
-                    <div className="absolute left-[7px] top-5 bottom-0 w-px bg-border" />
-                  )}
-                  <div className="w-[15px] flex justify-center pt-1.5 shrink-0">
-                    <div className={`w-2 h-2 rounded-full ${action.type === 'error' ? 'bg-destructive' : action.type === 'tool_use' ? 'bg-accent' : 'bg-primary/60'}`} />
-                  </div>
-                  <div className="pb-3 min-w-0 flex-1">
-                    <p className="text-xs text-foreground/90">{action.description}</p>
-                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                      <span className="text-[10px] font-mono text-muted-foreground">{action.timestamp}</span>
-                      {action.actorLabel && <span className="text-[10px] font-mono text-primary/70">{action.actorLabel}</span>}
-                      {action.tool && <span className="text-[10px] font-mono text-accent/70">{action.tool}</span>}
-                      {action.duration && <span className="text-[10px] font-mono text-muted-foreground">{action.duration}</span>}
-                    </div>
-                  </div>
-                </div>
-              ))}
+
+            {isRootWalter && walterActions.length > 0 && (
+              <div className="mb-4">
+                <h4 className="text-[10px] font-mono uppercase tracking-widest text-primary/80 mb-2">Walter Supervision</h4>
+                {renderActions(walterActions)}
+              </div>
+            )}
+
+            <div>
+              <h4 className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
+                {isRootWalter ? 'Session Activity' : 'Activity'}
+              </h4>
+              {renderActions(sessionActions)}
             </div>
           </div>
         </div>
