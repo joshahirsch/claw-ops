@@ -573,6 +573,80 @@ function normaliseRole(entry: RawTranscriptEntry): OpenClawMessage['role'] {
   return 'assistant';
 }
 
+export function sessionsToApprovals(sessions: OpenClawSession[]): import('@/data/types').Approval[] {
+  const { nodeMap } = buildNodeMaps(sessions);
+  return sessions
+    .filter((s) => s.status.phase === 'waiting')
+    .map((session) => {
+      const node = nodeMap.get(session.sessionKey);
+      const agentName = node ? buildAgentName(node) : session.sessionKey;
+      const lastMsg = session.messages[session.messages.length - 1];
+      return {
+        id: session.sessionKey,
+        agentName,
+        agentId: session.sessionKey,
+        action: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 120) : 'Awaiting approval',
+        reason: 'Session is in waiting phase',
+        timestamp: formatClockTime(session.updatedAt),
+        status: 'pending' as const,
+      };
+    });
+}
+
+export function sessionsToFailures(sessions: OpenClawSession[]): import('@/data/types').Failure[] {
+  const { nodeMap } = buildNodeMaps(sessions);
+  return sessions
+    .filter((s) => {
+      const state = phaseToState(s.status.phase, s.messages);
+      return state === 'error' || state === 'stalled';
+    })
+    .map((session) => {
+      const node = nodeMap.get(session.sessionKey);
+      const agentName = node ? buildAgentName(node) : session.sessionKey;
+      const state = phaseToState(session.status.phase, session.messages);
+      const lastMsg = session.messages[session.messages.length - 1];
+      return {
+        id: session.sessionKey,
+        agentName,
+        agentId: session.sessionKey,
+        severity: (state === 'error' ? 'high' : 'medium') as import('@/data/types').Severity,
+        cause: typeof lastMsg?.content === 'string' ? lastMsg.content.slice(0, 200) : 'Unknown error',
+        recommendedAction: state === 'stalled' ? 'Review stalled session' : 'Investigate error',
+        status: (state === 'error' ? 'failed' : 'blocked') as 'failed' | 'blocked',
+        timestamp: formatClockTime(session.updatedAt),
+        task: typeof session.messages[0]?.content === 'string' ? session.messages[0].content.slice(0, 120) : 'Unknown task',
+      };
+    });
+}
+
+export function sessionsToReplaySessions(sessions: OpenClawSession[]): import('@/data/types').ReplaySession[] {
+  const { nodeMap } = buildNodeMaps(sessions);
+  return sessions
+    .filter((s) => phaseToState(s.status.phase, s.messages) === 'complete' || s.status.phase === 'idle' && s.messages.length > 0)
+    .map((session) => {
+      const node = nodeMap.get(session.sessionKey);
+      const agentName = node ? buildAgentName(node) : session.sessionKey;
+      const firstMsg = session.messages[0];
+      const lastMsg = session.messages[session.messages.length - 1];
+      return {
+        id: session.sessionKey,
+        agentName,
+        task: typeof firstMsg?.content === 'string' ? firstMsg.content.slice(0, 120) : 'Unknown task',
+        startTime: firstMsg?.timestamp || session.updatedAt,
+        endTime: lastMsg?.timestamp || session.updatedAt,
+        status: 'completed' as const,
+        steps: session.messages.slice(-20).map((msg) => ({
+          id: msg.id,
+          timestamp: formatClockTime(msg.timestamp),
+          type: (msg.role === 'toolResult' ? 'tool_use' : msg.role === 'assistant' ? 'thinking' : 'idle') as import('@/data/types').ReplayStep['type'],
+          description: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
+          tool: msg.toolName,
+          duration: '—',
+        })),
+      };
+    });
+}
+
 export function jsonlToSession(
   sessionKey: string,
   lines: RawTranscriptEntry[]
