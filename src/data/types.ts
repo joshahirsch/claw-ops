@@ -10,6 +10,8 @@ export type AgentState =
 
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
 
+export type AgentActionSource = 'walter_supervision' | 'session_activity';
+
 export interface AgentHierarchy {
   rootSessionKey: string;
   parentSessionKey?: string;
@@ -75,6 +77,7 @@ export interface AgentAction {
   tool?: string;
   duration?: string;
   actorLabel?: string;
+  source?: AgentActionSource;
 }
 
 export interface ActivityEvent {

@@ -11,8 +11,10 @@ const AgentDrawer = ({ agent, onClose }: AgentDrawerProps) => {
   if (!agent) return null;
 
   const isRootWalter = !agent.hierarchy?.isSubSession && agent.agentKind === 'walter';
-  const walterActions = isRootWalter ? agent.actions.filter((action) => action.actorLabel === 'Walter') : [];
-  const sessionActions = isRootWalter ? agent.actions.filter((action) => action.actorLabel !== 'Walter') : agent.actions;
+  const walterActions = isRootWalter ? agent.actions.filter((action) => action.source === 'walter_supervision') : [];
+  const sessionActions = isRootWalter
+    ? agent.actions.filter((action) => action.source !== 'walter_supervision')
+    : agent.actions.filter((action) => action.source === 'session_activity' || !action.source);
 
   const renderActions = (actions: typeof agent.actions) => (
     <div className="space-y-0">

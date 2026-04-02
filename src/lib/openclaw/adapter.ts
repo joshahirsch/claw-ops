@@ -10,7 +10,7 @@
  * this adapter converts to Agent / ActivityEvent.
  */
 import type { OpenClawSession, OpenClawMessage, RawTranscriptEntry } from './types';
-import type { Agent, AgentState, AgentAction, ActivityEvent, ChildSessionRollup, ConflictSummary, StaleSessionSummary, Severity } from '@/data/types';
+import type { Agent, AgentState, AgentAction, AgentActionSource, ActivityEvent, ChildSessionRollup, ConflictSummary, StaleSessionSummary, Severity } from '@/data/types';
 import { buildWalterSessionTree, sessionsToWalterNodes, type WalterSessionNode, type WalterSessionTreeNode } from './subagents';
 
 const STALE_RUNNING_THRESHOLD_MINUTES = 10;
@@ -62,6 +62,7 @@ function messageToAction(msg: OpenClawMessage, actorLabel: string): AgentAction 
     description: typeof msg.content === 'string' ? msg.content.slice(0, 200) : JSON.stringify(msg.content).slice(0, 200),
     tool: msg.toolName,
     actorLabel,
+    source: 'session_activity',
   };
 }
 
@@ -326,6 +327,7 @@ function supervisionEventToAction(event: ActivityEvent & { sortTimestamp: string
     type: event.type === 'approval_request' ? 'approval_request' : event.type === 'error' || event.type === 'stalled' ? 'error' : 'reasoning',
     description: event.message,
     actorLabel: event.agentName,
+    source: 'walter_supervision',
     sortTimestamp: event.sortTimestamp,
   };
 }
