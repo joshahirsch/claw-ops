@@ -81,6 +81,91 @@ function classifyError(e: unknown): { message: string; type: string } {
   return { message: String(e), type: 'unknown' };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeMessage(raw: unknown, index: number): OpenClawMessage | null {
+  if (!isRecord(raw)) return null;
+
+  const role =
+    raw.role === 'user' || raw.role === 'assistant' || raw.role === 'toolResult'
+      ? raw.role
+      : 'assistant';
+
+  const type =
+    raw.type === 'message' ||
+    raw.type === 'custom_message' ||
+    raw.type === 'custom' ||
+    raw.type === 'compaction' ||
+    raw.type === 'branch_summary' ||
+    raw.type === 'session_header'
+      ? raw.type
+      : 'message';
+
+  const timestamp =
+    typeof raw.timestamp === 'string' && raw.timestamp.trim()
+      ? raw.timestamp
+      : new Date().toISOString();
+
+  const content =
+    typeof raw.content === 'string' || isRecord(raw.content)
+      ? raw.content
+      : '';
+
+  return {
+    id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : `msg-${index}-${crypto.randomUUID()}`,
+    parentId: typeof raw.parentId === 'string' ? raw.parentId : null,
+    type,
+    role,
+    content,
+    timestamp,
+    toolName: typeof raw.toolName === 'string' ? raw.toolName : undefined,
+    toolInput: isRecord(raw.toolInput) ? raw.toolInput : undefined,
+    toolOutput: typeof raw.toolOutput === 'string' ? raw.toolOutput : undefined,
+  };
+}
+
+function normalizeSession(raw: unknown): OpenClawSession | null {
+  if (!isRecord(raw)) return null;
+
+  const sessionKey = typeof raw.sessionKey === 'string' ? raw.sessionKey.trim() : '';
+  if (!sessionKey) return null;
+
+  const messages = Array.isArray(raw.messages)
+    ? raw.messages
+        .map((message, index) => normalizeMessage(message, index))
+        .filter((message): message is OpenClawMessage => message !== null)
+    : [];
+
+  const statusRecord = isRecord(raw.status) ? raw.status : null;
+  const phase =
+    statusRecord?.phase === 'idle' || statusRecord?.phase === 'running' || statusRecord?.phase === 'waiting'
+      ? statusRecord.phase
+      : 'idle';
+
+  const updatedAt =
+    typeof raw.updatedAt === 'string' && raw.updatedAt.trim()
+      ? raw.updatedAt
+      : messages[messages.length - 1]?.timestamp || new Date().toISOString();
+
+  return {
+    sessionKey,
+    sessionId: typeof raw.sessionId === 'string' && raw.sessionId.trim() ? raw.sessionId : sessionKey,
+    updatedAt,
+    messages,
+    status: {
+      phase,
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+      },
+    },
+  };
+}
+
 function buildProbePayload(probe: 'basic' | 'sse') {
   const config = getConfig();
   return {
@@ -227,7 +312,14 @@ export async function fetchSessionHistory(
     const detail = body.error || body.errorLabel || `${res.status} ${res.statusText}`;
     throw new Error(detail);
   }
-  return res.json();
+
+  const payload = await res.json();
+  const normalized = normalizeSession(payload);
+  if (!normalized) {
+    throw new Error(`Invalid session payload received for sessionKey=${sessionKey}`);
+  }
+
+  return normalized;
 }
 
 /**
@@ -240,9 +332,11 @@ export async function fetchAllSessions(
   const results = await Promise.allSettled(
     sessionKeys.map((key) => fetchSessionHistory(key, { includeTools: opts?.includeTools ?? true }))
   );
+
   return results
     .filter((r): r is PromiseFulfilledResult<OpenClawSession> => r.status === 'fulfilled')
-    .map((r) => r.value);
+    .map((r) => normalizeSession(r.value))
+    .filter((session): session is OpenClawSession => session !== null);
 }
 
 /**
@@ -289,8 +383,11 @@ export function subscribeSessionSSE(
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6)) as OpenClawMessage;
-              onMessage(data);
+              const parsed = JSON.parse(line.slice(6)) as unknown;
+              const data = normalizeMessage(parsed, 0);
+              if (data) {
+                onMessage(data);
+              }
             } catch {
               // Skip non-JSON SSE lines
             }

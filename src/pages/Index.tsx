@@ -10,7 +10,7 @@ import { Agent } from '@/data/types';
 
 const Dashboard = () => {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
-  const { agents, activity, isLive, isLoading } = useOpenClawData();
+  const { agents, activity, isLive, isLoading, error, usingMockData } = useOpenClawData();
 
   const active = agents.filter(a => !['idle', 'complete'].includes(a.state)).length;
   const thinking = agents.filter(a => a.state === 'thinking').length;
@@ -23,7 +23,9 @@ const Dashboard = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Real-time operational overview</p>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            {usingMockData ? 'Demo operational overview' : 'Real-time operational overview'}
+          </p>
         </div>
         {isLive && (
           <div className="flex items-center gap-1.5 text-[11px] font-mono text-success">
@@ -32,6 +34,16 @@ const Dashboard = () => {
           </div>
         )}
       </div>
+
+      {error && (
+        <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
+          Connection error: {error}
+        </div>
+      )}
+
+      {isLoading && agents.length === 0 && (
+        <div className="glass rounded-md p-4 text-sm text-muted-foreground">Loading dashboard…</div>
+      )}
 
       {/* KPIs */}
       <div className="grid grid-cols-5 gap-3">
@@ -55,11 +67,17 @@ const Dashboard = () => {
       {/* Agent Cards */}
       <div>
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Agent Status</h2>
-        <div className="grid grid-cols-2 gap-3">
-          {agents.map(agent => (
-            <AgentCard key={agent.id} agent={agent} onClick={setSelectedAgent} />
-          ))}
-        </div>
+        {agents.length === 0 && !isLoading ? (
+          <div className="glass rounded-md p-4 text-sm text-muted-foreground">
+            No live agents are available for the current session configuration.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            {agents.map(agent => (
+              <AgentCard key={agent.id} agent={agent} onClick={setSelectedAgent} />
+            ))}
+          </div>
+        )}
       </div>
 
       <AgentDrawer agent={selectedAgent} onClose={() => setSelectedAgent(null)} />

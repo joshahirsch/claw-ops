@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { mockApprovals } from '@/data/mockData';
 import { useOpenClawData } from '@/hooks/useOpenClawData';
 import { sessionsToApprovals } from '@/lib/openclaw/adapter';
@@ -5,8 +6,22 @@ import { ShieldCheck } from 'lucide-react';
 
 const ApprovalsPage = () => {
   const { sessions, isLoading, error, usingMockData } = useOpenClawData();
-  const approvals = usingMockData ? mockApprovals : sessionsToApprovals(sessions);
 
+  const { approvals, adapterError } = useMemo(() => {
+    if (usingMockData) {
+      return { approvals: mockApprovals, adapterError: null as string | null };
+    }
+
+    try {
+      return { approvals: sessionsToApprovals(sessions), adapterError: null as string | null };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown adapter error';
+      console.error('[ApprovalsPage]', e);
+      return { approvals: [], adapterError: `Adapter error: ${message}` };
+    }
+  }, [sessions, usingMockData]);
+
+  const displayError = error && adapterError ? `${error} | ${adapterError}` : error || adapterError;
   const pending = approvals.filter((a) => a.status === 'pending');
   const resolved = approvals.filter((a) => a.status !== 'pending');
 
@@ -25,9 +40,9 @@ const ApprovalsPage = () => {
         </div>
       )}
 
-      {error && (
+      {displayError && (
         <div className="glass rounded-md p-3 text-sm text-destructive border border-destructive/20">
-          Connection error: {error}
+          Connection error: {displayError}
         </div>
       )}
 
