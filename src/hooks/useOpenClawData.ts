@@ -16,7 +16,48 @@ import { mockAgents, mockActivity } from '@/data/mockData';
 import type { OpenClawSession, OpenClawMessage } from '@/lib/openclaw/types';
 import type { Agent, ActivityEvent } from '@/data/types';
 
-interface UseOpenClawDataReturn {
+/** States that represent a terminal or blocking failure */
+const BLOCKING_FAILURE_STATES: ConnectionState[] = [
+  'auth-rejected', 'failed',
+];
+
+/** States that require auth to have succeeded first */
+const AUTH_GATED_STATES: ConnectionState[] = [
+  'session-binding', 'session-ready', 'stream-active',
+];
+
+function isBlockedByFailure(diag: ConnectionDiagnostics | null): boolean {
+  if (!diag) return false;
+  return BLOCKING_FAILURE_STATES.includes(diag.state) ||
+    diag.steps.some(s => BLOCKING_FAILURE_STATES.includes(s.state));
+}
+
+/**
+ * Guarded addStep: prevents advancing to auth-gated states
+ * if the diagnostics already contain a blocking failure.
+ */
+function addStepGuarded(
+  diag: ConnectionDiagnostics,
+  state: ConnectionState,
+  detail: string,
+  opts?: { httpStatus?: number; error?: string; durationMs?: number }
+): ConnectionDiagnostics {
+  // Always allow failure/degraded states through
+  if (BLOCKING_FAILURE_STATES.includes(state) || state === 'scope-limited' || state === 'degraded') {
+    return addStep(diag, state, detail, opts);
+  }
+
+  // Block auth-gated states if a blocking failure already occurred
+  if (AUTH_GATED_STATES.includes(state) && isBlockedByFailure(diag)) {
+    // Record the attempt as informational but don't advance state
+    const infoStep = addStep(diag, diag.state, `[blocked] ${detail} — auth prerequisite not met`, opts);
+    return infoStep;
+  }
+
+  return addStep(diag, state, detail, opts);
+}
+
+export interface UseOpenClawDataReturn {
   sessions: OpenClawSession[];
   agents: Agent[];
   activity: ActivityEvent[];
@@ -24,10 +65,13 @@ interface UseOpenClawDataReturn {
   isLoading: boolean;
   error: string | null;
   wsConnected: boolean;
+  wsAuthAccepted: boolean;
   usingMockData: boolean;
   connectionState: ConnectionState;
   failureCategory: FailureCategory;
   connectionDiagnostics: ConnectionDiagnostics | null;
+  /** Single source of truth: is the app actually ready for real-time operation? */
+  isActuallyReady: boolean;
 }
 
 export function useOpenClawData(): UseOpenClawDataReturn {
@@ -35,6 +79,8 @@ export function useOpenClawData(): UseOpenClawDataReturn {
   const queryClient = useQueryClient();
   const [liveMessages, setLiveMessages] = useState<Map<string, OpenClawMessage[]>>(new Map());
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsAuthAccepted, setWsAuthAccepted] = useState(false);
+  const [wsAuthFailed, setWsAuthFailed] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [failureCategory, setFailureCategory] = useState<FailureCategory>('none');
   const [connDiag, setConnDiag] = useState<ConnectionDiagnostics | null>(null);
@@ -49,6 +95,10 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       if (!prev) return prev;
       const next = updater(prev);
       setConnectionState(next.state);
+      // Keep failureCategory in sync with diagnostics
+      if (next.failureCategory !== 'none') {
+        setFailureCategory(next.failureCategory);
+      }
       return next;
     });
   }, []);
@@ -57,6 +107,8 @@ export function useOpenClawData(): UseOpenClawDataReturn {
   useEffect(() => {
     setLiveMessages(new Map());
     setWsConnected(false);
+    setWsAuthAccepted(false);
+    setWsAuthFailed(false);
     setConnectionState(config.enabled ? 'validating-config' : 'idle');
     setFailureCategory('none');
 
@@ -87,13 +139,14 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       sessionKeySignature,
     ],
     queryFn: async () => {
-      updateDiag(d => addStep(d, 'session-binding', 'Fetching session history'));
+      // Use guarded step — won't advance to session-binding/ready if auth failed
+      updateDiag(d => addStepGuarded(d, 'session-binding', 'Fetching session history'));
 
       try {
         const sessions = await fetchAllSessions(config.sessionKeys, { includeTools: true });
 
-        updateDiag(d => addStep(d, 'session-ready', `Loaded ${sessions.length} session(s)`));
-        setFailureCategory('none');
+        // Only mark session-ready if auth hasn't failed
+        updateDiag(d => addStepGuarded(d, 'session-ready', `Loaded ${sessions.length} session(s)`));
 
         return sessions;
       } catch (e) {
@@ -104,10 +157,14 @@ export function useOpenClawData(): UseOpenClawDataReturn {
           classifyFailure(errWithCat.httpStatus, errMsg);
 
         setFailureCategory(category);
-        updateDiag(d => addStep(d, 'failed', errMsg, {
-          error: errMsg,
-          httpStatus: errWithCat.httpStatus,
-        }));
+        updateDiag(d => {
+          let updated = addStep(d, 'failed', errMsg, {
+            error: errMsg,
+            httpStatus: errWithCat.httpStatus,
+          });
+          updated = { ...updated, failureCategory: category };
+          return updated;
+        });
 
         throw e;
       }
@@ -140,22 +197,33 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       },
       onDisconnect: () => {
         setWsConnected(false);
+        setWsAuthAccepted(false);
         updateDiag(d => {
-          // Only mark degraded if we were previously connected
-          if (d.state === 'stream-active' || d.state === 'session-ready' || d.state === 'websocket-connected') {
+          // Only mark degraded if we were previously in a success state
+          if (d.state === 'stream-active' || d.state === 'session-ready' || d.state === 'websocket-connected' || d.state === 'auth-accepted') {
             return addStep(d, 'degraded', 'WebSocket disconnected');
           }
           return d;
         });
       },
       onAuthRejected: (status, detail) => {
+        setWsAuthFailed(true);
+        setWsAuthAccepted(false);
         setFailureCategory('token-rejected');
-        updateDiag(d => addStep(d, 'auth-rejected', `Auth rejected: ${detail}`, { error: `WS auth ${status}` }));
+        updateDiag(d => {
+          let updated = addStep(d, 'auth-rejected', `Auth rejected: ${detail}`, { error: `WS auth ${status}` });
+          updated = { ...updated, failureCategory: 'token-rejected' };
+          return updated;
+        });
         console.warn('[OpenClaw WS] Auth rejected:', status, detail);
       },
       onScopeLimited: (scopes) => {
         setFailureCategory('token-accepted-missing-scope');
-        updateDiag(d => addStep(d, 'scope-limited', `Missing scopes: ${scopes}`, { error: `Missing scopes: ${scopes}` }));
+        updateDiag(d => {
+          let updated = addStep(d, 'scope-limited', `Missing scopes: ${scopes}`, { error: `Missing scopes: ${scopes}` });
+          updated = { ...updated, failureCategory: 'token-accepted-missing-scope' };
+          return updated;
+        });
         console.warn('[OpenClaw WS] Scope limited:', scopes);
       },
       onError: (err) => console.warn('[OpenClaw WS]', err.message),
@@ -169,12 +237,15 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       ws.dispose();
       wsRef.current = null;
       setWsConnected(false);
+      setWsAuthAccepted(false);
     };
   }, [config.enabled, config.wsUrl, config.authMode, config.authToken, sessionKeySignature, queryClient, updateDiag]);
 
-  // SSE connection
+  // SSE connection — guarded by auth state
   useEffect(() => {
     if (!config.enabled) return;
+    // Don't start SSE if WS auth has failed
+    if (wsAuthFailed) return;
 
     const controllers = sseControllersRef.current;
     config.sessionKeys.forEach((key) => {
@@ -188,10 +259,10 @@ export function useOpenClawData(): UseOpenClawDataReturn {
             next.set(key, [...msgs, msg]);
             return next;
           });
-          // Mark stream as active on first SSE message
+          // Mark stream as active — guarded
           updateDiag(d => {
             if (d.state !== 'stream-active') {
-              return addStep(d, 'stream-active', 'Receiving live SSE updates');
+              return addStepGuarded(d, 'stream-active', 'Receiving live SSE updates');
             }
             return d;
           });
@@ -205,7 +276,7 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       controllers.forEach((ctrl) => ctrl.abort());
       controllers.clear();
     };
-  }, [config.enabled, config.baseUrl, config.authMode, config.authToken, sessionKeySignature, updateDiag]);
+  }, [config.enabled, config.baseUrl, config.authMode, config.authToken, sessionKeySignature, updateDiag, wsAuthFailed]);
 
   // Merge polled + live messages
   const mergedSessions = useMemo<OpenClawSession[]>(() => {
@@ -227,6 +298,37 @@ export function useOpenClawData(): UseOpenClawDataReturn {
     });
   }, [polledSessions, liveMessages]);
 
+  // === DERIVED READINESS: single source of truth ===
+  const isActuallyReady = useMemo(() => {
+    if (!config.enabled) return false;
+    if (wsAuthFailed) return false;
+    if (!wsConnected) return false;
+    // If auth mode requires a token, wsAuthAccepted must be true
+    if (config.authMode !== 'none' && !wsAuthAccepted) return false;
+    // Check diagnostics for any blocking failure
+    if (isBlockedByFailure(connDiag)) return false;
+    return true;
+  }, [config.enabled, config.authMode, wsAuthFailed, wsConnected, wsAuthAccepted, connDiag]);
+
+  // Derive the effective connection state for display — override if contradictory
+  const effectiveConnectionState = useMemo((): ConnectionState => {
+    if (!config.enabled) return 'idle';
+    // If auth failed, that's the authoritative state regardless of what the state machine says
+    if (wsAuthFailed) return 'auth-rejected';
+    // If we have a blocking failure in diagnostics
+    if (connDiag && isBlockedByFailure(connDiag)) {
+      return connDiag.state;
+    }
+    return connectionState;
+  }, [config.enabled, wsAuthFailed, connDiag, connectionState]);
+
+  // Derive the effective failure category
+  const effectiveFailureCategory = useMemo((): FailureCategory => {
+    if (wsAuthFailed) return 'token-rejected';
+    if (connDiag?.failureCategory && connDiag.failureCategory !== 'none') return connDiag.failureCategory;
+    return failureCategory;
+  }, [wsAuthFailed, connDiag, failureCategory]);
+
   // Mock data path
   if (!config.enabled) {
     return {
@@ -237,10 +339,12 @@ export function useOpenClawData(): UseOpenClawDataReturn {
       isLoading: false,
       error: null,
       wsConnected: false,
+      wsAuthAccepted: false,
       usingMockData: true,
       connectionState: 'idle',
       failureCategory: 'none',
       connectionDiagnostics: null,
+      isActuallyReady: false,
     };
   }
 
@@ -262,13 +366,15 @@ export function useOpenClawData(): UseOpenClawDataReturn {
     sessions: mergedSessions,
     agents,
     activity,
-    isLive: wsConnected || mergedSessions.length > 0,
+    isLive: isActuallyReady && (wsConnected || mergedSessions.length > 0),
     isLoading,
     error: derivedError,
     wsConnected,
+    wsAuthAccepted,
     usingMockData: false,
-    connectionState,
-    failureCategory,
+    connectionState: effectiveConnectionState,
+    failureCategory: effectiveFailureCategory,
     connectionDiagnostics: connDiag,
+    isActuallyReady,
   };
 }
