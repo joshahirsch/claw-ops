@@ -557,7 +557,7 @@ export async function sendPrompt(
   if (!result.ok) {
     const detail = result.message || result.errorLabel || result.clientError || 'Unknown error';
     const err = new Error(detail) as Error & { failureCategory?: string; httpStatus?: number };
-    err.failureCategory = (result as Record<string, unknown>).failureCategory as string | undefined;
+    err.failureCategory = result.failureCategory;
     err.httpStatus = result.upstreamStatus || result.proxyHttpStatus;
     throw err;
   }
