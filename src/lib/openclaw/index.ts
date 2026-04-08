@@ -2,4 +2,5 @@ export * from './types';
 export * from './config';
 export * from './client';
 export * from './adapter';
+export * from './connection-state';
 export { OpenClawWebSocket } from './websocket';
