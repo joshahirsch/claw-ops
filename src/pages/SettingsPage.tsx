@@ -203,7 +203,7 @@ const FAILURE_ICONS: Record<string, React.ReactNode> = {
 };
 
 const ConnectionStatePanel = () => {
-  const { connectionState, failureCategory, connectionDiagnostics, wsConnected, error } = useOpenClawData();
+  const { connectionState, failureCategory, connectionDiagnostics, wsConnected, wsAuthAccepted, error, isActuallyReady } = useOpenClawData();
   const [showTimeline, setShowTimeline] = useState(false);
 
   const stateColor = CONNECTION_STATE_COLORS[connectionState] || 'text-muted-foreground';
@@ -228,7 +228,29 @@ const ConnectionStatePanel = () => {
         )}
       </div>
 
+      {/* Readiness banner */}
+      <div className={`rounded-md p-2.5 mb-3 text-xs font-mono flex items-center gap-2 border ${
+        isActuallyReady
+          ? 'bg-success/10 border-success/20 text-success'
+          : 'bg-destructive/10 border-destructive/20 text-destructive'
+      }`}>
+        {isActuallyReady
+          ? <><CheckCircle className="w-3.5 h-3.5 shrink-0" /> App ready — session runtime active</>
+          : <><XCircle className="w-3.5 h-3.5 shrink-0" /> App not ready — {
+              failureCategory === 'token-rejected' ? 'WebSocket auth rejected'
+              : failureCategory === 'token-accepted-missing-scope' ? 'Token accepted but missing required scope'
+              : !wsConnected ? 'WebSocket not connected'
+              : 'prerequisites not met'
+            }</>
+        }
+      </div>
+
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs font-mono">
+        <span className="text-muted-foreground">Readiness:</span>
+        <span className={`font-semibold ${isActuallyReady ? 'text-success' : 'text-destructive'}`}>
+          {isActuallyReady ? 'READY' : 'NOT READY'}
+        </span>
+
         <span className="text-muted-foreground">State:</span>
         <span className={`font-semibold ${stateColor}`}>{connectionState}</span>
 
@@ -241,8 +263,13 @@ const ConnectionStatePanel = () => {
         </span>
 
         <span className="text-muted-foreground">WebSocket:</span>
-        <span className={wsConnected ? 'text-success' : 'text-muted-foreground'}>
+        <span className={wsConnected ? 'text-success' : 'text-destructive'}>
           {wsConnected ? 'Connected' : 'Not connected'}
+        </span>
+
+        <span className="text-muted-foreground">WS Auth:</span>
+        <span className={wsAuthAccepted ? 'text-success' : failureCategory === 'token-rejected' ? 'text-destructive' : 'text-muted-foreground'}>
+          {wsAuthAccepted ? 'Accepted' : failureCategory === 'token-rejected' ? 'Rejected' : 'Pending'}
         </span>
 
         {connectionDiagnostics?.tokenPresent !== undefined && (
@@ -287,7 +314,6 @@ const ConnectionStatePanel = () => {
           </>
         )}
       </div>
-
       {connectionDiagnostics && connectionDiagnostics.steps.length > 0 && (
         <div className="mt-3">
           <button
@@ -348,26 +374,30 @@ const SettingsPage = () => {
   const hasWorkingSSE = Boolean(sseResult?.ok);
   const hasWorkingProxy = Boolean(healthResult?.ok);
 
+  const { isActuallyReady, wsConnected: liveWsConnected, wsAuthAccepted: liveWsAuth, failureCategory: liveFailure } = useOpenClawData();
+
   const health: HealthItem[] = [
     {
-      label: 'OpenClaw Connection',
+      label: 'App Readiness',
       status: !savedConfig.enabled
         ? 'disconnected'
-        : hasWorkingBasic || connectionStatus === 'connected'
+        : isActuallyReady
           ? 'connected'
-          : connectionStatus === 'failed'
-            ? 'disconnected'
-            : 'degraded',
+          : 'disconnected',
       detail: !savedConfig.enabled
         ? 'Not configured'
-        : hasWorkingBasic || connectionStatus === 'connected'
-          ? `Connected${basicResult?.latencyMs ? `, latency ${basicResult.latencyMs}ms` : ''}`
-          : connectionStatus === 'failed'
-            ? basicResult?.message || basicResult?.errorLabel || basicResult?.clientError || 'Connection failed'
-            : 'Configured, awaiting verification',
+        : isActuallyReady
+          ? 'All prerequisites met — session runtime active'
+          : liveFailure === 'token-rejected'
+            ? 'WebSocket auth rejected — token invalid or wrong handshake'
+            : liveFailure === 'token-accepted-missing-scope'
+              ? 'Token accepted but missing required scope (operator.read)'
+              : !liveWsConnected
+                ? 'WebSocket not connected'
+                : 'Prerequisites not met',
     },
     {
-      label: 'Gateway Status',
+      label: 'Proxy Gateway',
       status: !savedConfig.enabled
         ? 'disconnected'
         : hasWorkingProxy
@@ -382,21 +412,55 @@ const SettingsPage = () => {
           : savedConfig.baseUrl || 'Configured, proxy not yet tested',
     },
     {
-      label: 'Session Stream',
+      label: 'WebSocket Auth',
+      status: !savedConfig.enabled
+        ? 'disconnected'
+        : liveWsAuth
+          ? 'connected'
+          : liveFailure === 'token-rejected'
+            ? 'disconnected'
+            : liveWsConnected
+              ? 'degraded'
+              : 'disconnected',
+      detail: !savedConfig.enabled
+        ? 'Not configured'
+        : liveWsAuth
+          ? 'Authenticated'
+          : liveFailure === 'token-rejected'
+            ? 'Auth rejected'
+            : liveWsConnected
+              ? 'Connected, auth pending'
+              : 'Not connected',
+    },
+    {
+      label: 'History Endpoint',
+      status: !savedConfig.enabled
+        ? 'disconnected'
+        : hasWorkingBasic
+          ? 'connected'
+          : basicResult && !basicResult.ok
+            ? 'disconnected'
+            : 'degraded',
+      detail: !savedConfig.enabled
+        ? 'Untested'
+        : hasWorkingBasic
+          ? `OK${basicResult?.latencyMs ? ` (${basicResult.latencyMs}ms)` : ''}`
+          : basicResult?.message || basicResult?.errorLabel || 'Not yet tested',
+    },
+    {
+      label: 'SSE Stream',
       status: !savedConfig.enabled
         ? 'disconnected'
         : hasWorkingSSE
           ? 'connected'
-          : hasWorkingBasic
-            ? 'degraded'
-            : 'disconnected',
+          : sseResult && !sseResult.ok
+            ? 'disconnected'
+            : 'degraded',
       detail: !savedConfig.enabled
         ? 'Untested'
         : hasWorkingSSE
           ? 'SSE follow=1 OK'
-          : hasWorkingBasic
-            ? 'Configured, SSE not yet verified'
-            : 'Untested',
+          : sseResult?.message || sseResult?.errorLabel || 'Not yet tested',
     },
   ];
 
