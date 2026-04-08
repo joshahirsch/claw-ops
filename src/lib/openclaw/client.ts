@@ -425,6 +425,7 @@ export interface ProbeResult {
   authMode?: string;
   latencyMs?: number;
   failurePoint?: string;
+  failureCategory?: string;
   bodySnippet?: string;
   parsedBody?: unknown;
   diagnostics?: Record<string, unknown>;
@@ -432,6 +433,7 @@ export interface ProbeResult {
   proxyHttpStatus?: number;
   proxyStatusText?: string;
   upstreamStatus?: number;
+  upstreamBody?: string;
   requestMethod?: string;
   requestHeadersSent?: Record<string, string>;
   headersReceived?: Record<string, string>;
@@ -528,20 +530,37 @@ export async function testConnection(): Promise<ProbeResult> {
 
 /**
  * Send a prompt to OpenClaw via POST /v1/responses through the proxy.
+ * Now routes through the proxy edge function with proper auth.
  */
 export async function sendPrompt(
   prompt: string,
   opts?: { sessionKey?: string }
 ): Promise<unknown> {
   const config = getConfig();
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (opts?.sessionKey) headers['x-openclaw-session-key'] = opts.sessionKey;
+  const payload = {
+    endpointPath: '/v1/responses',
+    baseUrl: config.baseUrl,
+    authMode: config.authMode,
+    authToken: config.authToken,
+    authHeaderName: config.authHeaderName,
+    authHeaderPrefix: config.authHeaderPrefix,
+    sessionKey: opts?.sessionKey || config.sessionKeys[0] || 'default',
+    requestPayload: { input: prompt },
+  };
 
-  const res = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/v1/responses`, {
+  const result = await callProxyJson({
     method: 'POST',
-    headers,
-    body: JSON.stringify({ input: prompt }),
+    body: payload,
+    timeoutMs: 30000,
   });
-  if (!res.ok) throw new Error(`OpenClaw: ${res.status} ${res.statusText}`);
-  return res.json();
+
+  if (!result.ok) {
+    const detail = result.message || result.errorLabel || result.clientError || 'Unknown error';
+    const err = new Error(detail) as Error & { failureCategory?: string; httpStatus?: number };
+    err.failureCategory = (result as Record<string, unknown>).failureCategory as string | undefined;
+    err.httpStatus = result.upstreamStatus || result.proxyHttpStatus;
+    throw err;
+  }
+
+  return result.parsedBody;
 }
