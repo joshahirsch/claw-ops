@@ -1,11 +1,7 @@
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-openclaw-base-url, x-openclaw-auth-mode, x-openclaw-auth-token, x-openclaw-auth-header-name, x-openclaw-auth-header-prefix, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-};
+import { corsHeaders } from '@supabase/supabase-js/cors'
 
 type ErrorStage = 'proxy_fetch' | 'upstream_fetch' | 'response_parse';
-type ErrorType = 'network' | 'timeout' | 'unauthorized' | 'forbidden' | 'not_found' | 'invalid_path' | 'server_error' | 'exception';
+type ErrorType = 'network' | 'timeout' | 'unauthorized' | 'forbidden' | 'scope_limited' | 'not_found' | 'invalid_path' | 'server_error' | 'exception';
 
 type ProbeType = 'health' | 'basic' | 'sse' | 'echo';
 
@@ -53,9 +49,11 @@ function buildErrorResponse(args: {
   message: string;
   upstreamUrl?: string;
   upstreamStatus?: number;
+  upstreamBody?: string;
   status?: number;
   diagnostics: Record<string, unknown>;
   rawErrorObject?: unknown;
+  failureCategory?: string;
 }) {
   return jsonResponse(
     {
@@ -65,20 +63,39 @@ function buildErrorResponse(args: {
       message: args.message,
       upstreamUrl: args.upstreamUrl,
       upstreamStatus: args.upstreamStatus,
+      upstreamBody: args.upstreamBody,
       rawErrorObject: args.rawErrorObject,
       diagnostics: args.diagnostics,
+      failureCategory: args.failureCategory,
     },
     args.status ?? 500,
   );
 }
 
-function classifyUpstreamError(status: number): { errorType: ErrorType; message: string } {
-  if (status === 401) return { errorType: 'unauthorized', message: '401 Unauthorized' };
-  if (status === 403) return { errorType: 'forbidden', message: '403 Forbidden' };
-  if (status === 404) return { errorType: 'not_found', message: '404 Not Found' };
-  if (status === 422) return { errorType: 'invalid_path', message: '422 Invalid session key/path' };
-  if (status >= 500) return { errorType: 'server_error', message: '5xx Proxy or upstream error' };
-  return { errorType: 'exception', message: `${status} Upstream error` };
+function classifyUpstreamError(status: number, body: string): { errorType: ErrorType; message: string; failureCategory: string } {
+  const lowered = body.toLowerCase();
+
+  if (status === 401) {
+    return { errorType: 'unauthorized', message: '401 Unauthorized — token rejected by gateway', failureCategory: 'token-rejected' };
+  }
+  if (status === 403) {
+    if (lowered.includes('scope') || lowered.includes('operator.read') || lowered.includes('permission')) {
+      // Extract the actual scope error message
+      let scopeDetail = '403 Forbidden — missing required scope';
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.error) scopeDetail = `403 Forbidden — ${parsed.error}`;
+        if (parsed.message) scopeDetail = `403 Forbidden — ${parsed.message}`;
+      } catch { /* use default */ }
+      return { errorType: 'scope_limited', message: scopeDetail, failureCategory: 'token-accepted-missing-scope' };
+    }
+    return { errorType: 'forbidden', message: '403 Forbidden', failureCategory: 'token-rejected' };
+  }
+  if (status === 404) return { errorType: 'not_found', message: '404 Not Found — endpoint may not exist', failureCategory: 'wrong-endpoint-or-protocol' };
+  if (status === 405) return { errorType: 'invalid_path', message: '405 Method Not Allowed — wrong HTTP method for this endpoint', failureCategory: 'wrong-endpoint-or-protocol' };
+  if (status === 422) return { errorType: 'invalid_path', message: '422 Invalid session key/path', failureCategory: 'wrong-endpoint-or-protocol' };
+  if (status >= 500) return { errorType: 'server_error', message: `${status} Server error`, failureCategory: 'gateway-unreachable' };
+  return { errorType: 'exception', message: `${status} Upstream error`, failureCategory: 'unknown' };
 }
 
 async function parseBody(req: Request, diagnostics: Record<string, unknown>) {
@@ -114,15 +131,12 @@ Deno.serve(async (req) => {
   };
 
   if (req.method === 'OPTIONS') {
-    console.log('[openclaw-proxy] OPTIONS:', JSON.stringify(baseDiagnostics));
     return jsonResponse(
       {
         ok: true,
         function: 'openclaw-proxy',
         method: 'OPTIONS',
         optionsHit: true,
-        headersReceived: baseDiagnostics.headersReceived,
-        queryParamsReceived: queryParams,
       },
       200,
     );
@@ -133,8 +147,7 @@ Deno.serve(async (req) => {
     const probeType = (asOptionalString(requestBody.probe) || url.searchParams.get('probe') || undefined) as ProbeType | undefined;
 
     if (probeType === 'health') {
-      console.log('[openclaw-proxy] Health probe hit');
-      return jsonResponse({ ok: true, function: 'openclaw-proxy', method: req.method, optionsHit: false }, 200);
+      return jsonResponse({ ok: true, function: 'openclaw-proxy', method: req.method }, 200);
     }
 
     const sessionKey = asOptionalString(requestBody.sessionKey) || url.searchParams.get('sessionKey') || undefined;
@@ -142,6 +155,9 @@ Deno.serve(async (req) => {
     const limit = asOptionalString(requestBody.limit) || url.searchParams.get('limit') || undefined;
     const cursor = asOptionalString(requestBody.cursor) || url.searchParams.get('cursor') || undefined;
     const includeTools = parseBooleanParam(requestBody.includeTools) || url.searchParams.get('includeTools') === '1';
+
+    // Support custom endpoint path (default: /sessions/{key}/history)
+    const endpointPath = asOptionalString(requestBody.endpointPath) || url.searchParams.get('endpointPath') || undefined;
 
     const openclawBaseUrl =
       asOptionalString(requestBody.baseUrl) ||
@@ -185,10 +201,10 @@ Deno.serve(async (req) => {
       limit,
       cursor,
       includeTools,
+      endpointPath,
     };
 
-    console.log('[openclaw-proxy] Incoming query params:', JSON.stringify(queryParams));
-    console.log('[openclaw-proxy] Incoming config summary:', JSON.stringify(baseDiagnostics.incomingConfig));
+    console.log('[openclaw-proxy] Config:', JSON.stringify(baseDiagnostics.incomingConfig));
 
     if (probeType === 'echo') {
       return jsonResponse(
@@ -197,7 +213,6 @@ Deno.serve(async (req) => {
           function: 'openclaw-proxy',
           probe: 'echo',
           method: req.method,
-          optionsHit: false,
           headersReceived: baseDiagnostics.headersReceived,
           queryParamsReceived: queryParams,
           requestBodyReceived: baseDiagnostics.requestBodyReceived,
@@ -215,21 +230,23 @@ Deno.serve(async (req) => {
         message: 'Missing OpenClaw base URL',
         status: 400,
         diagnostics: baseDiagnostics,
+        failureCategory: 'config-invalid',
       });
     }
 
-    if (!sessionKey) {
+    if (!sessionKey && !endpointPath) {
       return buildErrorResponse({
         stage: 'proxy_fetch',
         errorType: 'invalid_path',
-        message: 'Missing session key',
+        message: 'Missing session key and no custom endpoint path',
         status: 400,
         diagnostics: baseDiagnostics,
+        failureCategory: 'config-invalid',
       });
     }
 
     const baseUrl = openclawBaseUrl.replace(/\/+$/, '');
-    const encodedSessionKey = encodeURIComponent(sessionKey);
+    const encodedSessionKey = sessionKey ? encodeURIComponent(sessionKey) : '';
     const params = new URLSearchParams();
     const isSSEProbe = probeType === 'sse';
 
@@ -241,13 +258,18 @@ Deno.serve(async (req) => {
     }
 
     const queryString = params.toString();
-    const targetUrl = `${baseUrl}/sessions/${encodedSessionKey}/history${queryString ? `?${queryString}` : ''}`;
+
+    // Use custom endpoint path if provided, otherwise default to session history
+    const resolvedPath = endpointPath
+      ? endpointPath
+      : `/sessions/${encodedSessionKey}/history`;
+
+    const targetUrl = `${baseUrl}${resolvedPath}${queryString ? `?${queryString}` : ''}`;
 
     baseDiagnostics.upstreamUrl = targetUrl;
-    baseDiagnostics.encodedPath = `/sessions/${encodedSessionKey}/history`;
     baseDiagnostics.failurePoint = isSSEProbe ? 'sse_follow_probe' : 'session_history_fetch';
 
-    console.log('[openclaw-proxy] Resolved upstream URL:', targetUrl);
+    console.log('[openclaw-proxy] Upstream URL:', targetUrl);
 
     const upstreamHeaders: Record<string, string> = {
       Accept: 'application/json',
@@ -264,12 +286,8 @@ Deno.serve(async (req) => {
 
     baseDiagnostics.authMode = authMode;
     baseDiagnostics.authApplied = authApplied;
-    console.log('[openclaw-proxy] Auth mode used:', authMode);
-    console.log('[openclaw-proxy] Auth header attached:', String(authApplied));
 
     const fetchStartedAt = Date.now();
-    baseDiagnostics.fetchStart = new Date(fetchStartedAt).toISOString();
-    console.log('[openclaw-proxy] Fetch start:', baseDiagnostics.fetchStart);
 
     let upstreamResponse: Response;
     try {
@@ -284,9 +302,6 @@ Deno.serve(async (req) => {
       const lowered = message.toLowerCase();
       const errorType: ErrorType = lowered.includes('timeout') || lowered.includes('abort') ? 'timeout' : 'network';
 
-      baseDiagnostics.caughtException = { message, stack };
-      console.error('[openclaw-proxy] Caught exception:', message, stack);
-
       return buildErrorResponse({
         stage: 'proxy_fetch',
         errorType,
@@ -295,6 +310,7 @@ Deno.serve(async (req) => {
         status: 502,
         diagnostics: baseDiagnostics,
         rawErrorObject: { message, stack },
+        failureCategory: lowered.includes('dns') || lowered.includes('enotfound') ? 'dns-or-tunnel' : 'gateway-unreachable',
       });
     }
 
@@ -302,8 +318,8 @@ Deno.serve(async (req) => {
     baseDiagnostics.upstreamStatus = upstreamResponse.status;
     baseDiagnostics.statusText = upstreamResponse.statusText;
     baseDiagnostics.latencyMs = latencyMs;
-    console.log('[openclaw-proxy] Fetch response status:', upstreamResponse.status);
 
+    // SSE passthrough for live follow mode
     if (follow === '1' && !probeType && upstreamResponse.ok && upstreamResponse.body) {
       return new Response(upstreamResponse.body, {
         status: 200,
@@ -317,44 +333,38 @@ Deno.serve(async (req) => {
     }
 
     const responseText = await upstreamResponse.text();
-    const bodySnippet = responseText.slice(0, 500);
+    const bodySnippet = responseText.slice(0, 1000);
     baseDiagnostics.bodySnippet = bodySnippet;
-    console.log('[openclaw-proxy] First 500 chars of upstream body:', bodySnippet);
 
     let parsedBody: unknown = null;
     try {
       parsedBody = responseText ? JSON.parse(responseText) : null;
     } catch (error) {
-      if (probeType) {
-        baseDiagnostics.responseParseWarning = error instanceof Error ? error.message : String(error);
-      } else {
-        baseDiagnostics.caughtException = {
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-        };
-        console.error('[openclaw-proxy] Caught exception:', baseDiagnostics.caughtException);
+      if (!probeType) {
         return buildErrorResponse({
           stage: 'response_parse',
           errorType: 'exception',
           message: 'Failed to parse upstream JSON response',
           upstreamUrl: targetUrl,
           upstreamStatus: upstreamResponse.status,
+          upstreamBody: bodySnippet,
           status: 502,
           diagnostics: baseDiagnostics,
-          rawErrorObject: baseDiagnostics.caughtException,
         });
       }
     }
 
-    if (probeType) {
-      if (!upstreamResponse.ok) {
-        const classified = classifyUpstreamError(upstreamResponse.status);
+    if (!upstreamResponse.ok) {
+      const classified = classifyUpstreamError(upstreamResponse.status, responseText);
+
+      if (probeType) {
         return jsonResponse(
           {
             ok: false,
             stage: 'upstream_fetch',
             errorType: classified.errorType,
             message: classified.message,
+            failureCategory: classified.failureCategory,
             proxyRouteInvoked: baseDiagnostics.proxyRouteInvoked,
             upstreamUrl: targetUrl,
             sessionKeyRaw: sessionKey,
@@ -375,6 +385,21 @@ Deno.serve(async (req) => {
         );
       }
 
+      return buildErrorResponse({
+        stage: 'upstream_fetch',
+        errorType: classified.errorType,
+        message: classified.message,
+        upstreamUrl: targetUrl,
+        upstreamStatus: upstreamResponse.status,
+        upstreamBody: bodySnippet,
+        status: upstreamResponse.status,
+        diagnostics: { ...baseDiagnostics, parsedBody },
+        failureCategory: classified.failureCategory,
+      });
+    }
+
+    // Probe success response
+    if (probeType) {
       return jsonResponse(
         {
           ok: true,
@@ -399,22 +424,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    if (!upstreamResponse.ok) {
-      const classified = classifyUpstreamError(upstreamResponse.status);
-      return buildErrorResponse({
-        stage: 'upstream_fetch',
-        errorType: classified.errorType,
-        message: classified.message,
-        upstreamUrl: targetUrl,
-        upstreamStatus: upstreamResponse.status,
-        status: upstreamResponse.status,
-        diagnostics: {
-          ...baseDiagnostics,
-          parsedBody,
-        },
-      });
-    }
-
+    // Standard success passthrough
     return new Response(responseText, {
       status: 200,
       headers: {
@@ -426,7 +436,6 @@ Deno.serve(async (req) => {
     const message = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? error.stack : undefined;
     baseDiagnostics.caughtException = { message, stack };
-    console.error('[openclaw-proxy] Caught exception:', message, stack);
 
     return buildErrorResponse({
       stage: 'proxy_fetch',
