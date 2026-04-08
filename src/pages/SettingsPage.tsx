@@ -461,6 +461,8 @@ const SettingsPage = () => {
         </div>
       </div>
 
+      <ConnectionStatePanel />
+
       <div className="glass rounded-lg p-4">
         <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-3">Environment Health</h2>
         <div className="space-y-2">
