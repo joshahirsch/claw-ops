@@ -173,8 +173,156 @@ const ProbeDiagnostics = ({ result, probeType }: { result: ProbeResult; probeTyp
     </div>
   );
 };
+const CONNECTION_STATE_COLORS: Record<string, string> = {
+  'idle': 'text-muted-foreground',
+  'validating-config': 'text-muted-foreground',
+  'probing-http': 'text-primary',
+  'opening-websocket': 'text-primary',
+  'websocket-connected': 'text-primary',
+  'authenticating': 'text-primary',
+  'auth-accepted': 'text-success',
+  'auth-rejected': 'text-destructive',
+  'scope-limited': 'text-warning',
+  'session-binding': 'text-primary',
+  'session-ready': 'text-success',
+  'stream-active': 'text-success',
+  'degraded': 'text-warning',
+  'failed': 'text-destructive',
+};
 
-const SettingsPage = () => {
+const FAILURE_ICONS: Record<string, React.ReactNode> = {
+  'none': <CheckCircle className="w-4 h-4 text-success" />,
+  'token-rejected': <Shield className="w-4 h-4 text-destructive" />,
+  'token-accepted-missing-scope': <AlertTriangle className="w-4 h-4 text-warning" />,
+  'wrong-endpoint-or-protocol': <XCircle className="w-4 h-4 text-destructive" />,
+  'gateway-unreachable': <XCircle className="w-4 h-4 text-destructive" />,
+  'dns-or-tunnel': <XCircle className="w-4 h-4 text-destructive" />,
+  'session-stream-failure': <AlertTriangle className="w-4 h-4 text-warning" />,
+  'config-invalid': <AlertTriangle className="w-4 h-4 text-warning" />,
+  'unknown': <Minus className="w-4 h-4 text-muted-foreground" />,
+};
+
+const ConnectionStatePanel = () => {
+  const { connectionState, failureCategory, connectionDiagnostics, wsConnected, error } = useOpenClawData();
+  const [showTimeline, setShowTimeline] = useState(false);
+
+  const stateColor = CONNECTION_STATE_COLORS[connectionState] || 'text-muted-foreground';
+  const failureIcon = FAILURE_ICONS[failureCategory] || FAILURE_ICONS['unknown'];
+
+  const handleCopyDiagnostics = () => {
+    if (!connectionDiagnostics) return;
+    const text = buildCopyableDiagnostics(connectionDiagnostics);
+    navigator.clipboard.writeText(text).then(() => toast.success('Diagnostics copied'));
+  };
+
+  if (connectionState === 'idle') return null;
+
+  return (
+    <div className="glass rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Connection State Machine</h2>
+        {connectionDiagnostics && (
+          <button onClick={handleCopyDiagnostics} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
+            <Copy className="w-3 h-3" /> Copy diagnostics
+          </button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs font-mono">
+        <span className="text-muted-foreground">State:</span>
+        <span className={`font-semibold ${stateColor}`}>{connectionState}</span>
+
+        <span className="text-muted-foreground">Failure:</span>
+        <span className="flex items-center gap-1.5">
+          {failureIcon}
+          <span className={failureCategory !== 'none' ? 'text-destructive' : 'text-success'}>
+            {failureCategoryLabel(failureCategory)}
+          </span>
+        </span>
+
+        <span className="text-muted-foreground">WebSocket:</span>
+        <span className={wsConnected ? 'text-success' : 'text-muted-foreground'}>
+          {wsConnected ? 'Connected' : 'Not connected'}
+        </span>
+
+        {connectionDiagnostics?.tokenPresent !== undefined && (
+          <>
+            <span className="text-muted-foreground">Token:</span>
+            <span>{connectionDiagnostics.tokenPresent ? `Present (${connectionDiagnostics.tokenMasked})` : 'Not set'}</span>
+          </>
+        )}
+
+        {connectionDiagnostics?.correlationId && (
+          <>
+            <span className="text-muted-foreground">Correlation:</span>
+            <span className="text-muted-foreground">{connectionDiagnostics.correlationId}</span>
+          </>
+        )}
+
+        {error && (
+          <>
+            <span className="text-muted-foreground">Error:</span>
+            <span className="text-destructive break-all">{error}</span>
+          </>
+        )}
+
+        {connectionDiagnostics?.lastSuccessfulStep && (
+          <>
+            <span className="text-muted-foreground">Last success:</span>
+            <span className="text-success">{connectionDiagnostics.lastSuccessfulStep}</span>
+          </>
+        )}
+
+        {connectionDiagnostics?.firstFailedStep && (
+          <>
+            <span className="text-muted-foreground">First failure:</span>
+            <span className="text-destructive">{connectionDiagnostics.firstFailedStep}</span>
+          </>
+        )}
+
+        {connectionDiagnostics?.firstError && (
+          <>
+            <span className="text-muted-foreground">First error:</span>
+            <span className="text-destructive break-all">{connectionDiagnostics.firstError}</span>
+          </>
+        )}
+      </div>
+
+      {connectionDiagnostics && connectionDiagnostics.steps.length > 0 && (
+        <div className="mt-3">
+          <button
+            onClick={() => setShowTimeline(p => !p)}
+            className="text-xs text-primary hover:text-primary/80 flex items-center gap-1"
+          >
+            <ChevronDown className={`w-3 h-3 transition-transform ${showTimeline ? 'rotate-180' : ''}`} />
+            {showTimeline ? 'Hide' : 'Show'} event timeline ({connectionDiagnostics.steps.length} steps)
+          </button>
+
+          {showTimeline && (
+            <div className="mt-2 space-y-1 max-h-60 overflow-y-auto">
+              {connectionDiagnostics.steps.map((step, i) => {
+                const isError = Boolean(step.error);
+                return (
+                  <div key={i} className={`text-[11px] font-mono p-1.5 rounded ${isError ? 'bg-destructive/5 border border-destructive/10' : 'bg-background/50'}`}>
+                    <span className="text-muted-foreground">{new Date(step.timestamp).toLocaleTimeString()}</span>
+                    {' '}
+                    <span className={CONNECTION_STATE_COLORS[step.state] || 'text-foreground'}>{step.state}</span>
+                    {': '}
+                    <span className={isError ? 'text-destructive' : 'text-foreground'}>{step.detail}</span>
+                    {step.httpStatus && <span className="text-muted-foreground"> (HTTP {step.httpStatus})</span>}
+                    {step.durationMs && <span className="text-muted-foreground"> ({step.durationMs}ms)</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+
   const savedConfig = useOpenClawConfig();
   const [config, setConfig] = useState<OpenClawConfig>(savedConfig);
   const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | 'echo' | null>(null);
