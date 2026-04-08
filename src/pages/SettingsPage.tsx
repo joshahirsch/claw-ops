@@ -322,7 +322,7 @@ const ConnectionStatePanel = () => {
   );
 };
 
-
+const SettingsPage = () => {
   const savedConfig = useOpenClawConfig();
   const [config, setConfig] = useState<OpenClawConfig>(savedConfig);
   const [probing, setProbing] = useState<'basic' | 'sse' | 'health' | 'echo' | null>(null);
