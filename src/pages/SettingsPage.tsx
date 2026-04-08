@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse, Search } from 'lucide-react';
+import { CheckCircle, XCircle, Minus, Loader2, Wifi, WifiOff, ChevronDown, Activity, Zap, HeartPulse, Search, Copy, Shield, AlertTriangle } from 'lucide-react';
 import { saveConfig, type OpenClawConfig, type AuthMode, useOpenClawConfig } from '@/lib/openclaw/config';
 import { runBasicProbe, runEchoProbe, runHealthProbe, runSSEProbe, type ProbeResult } from '@/lib/openclaw/client';
+import { failureCategoryLabel, buildCopyableDiagnostics } from '@/lib/openclaw/connection-state';
+import { useOpenClawData } from '@/hooks/useOpenClawData';
 import { toast } from 'sonner';
 
 interface HealthItem {
